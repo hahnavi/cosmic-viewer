@@ -167,43 +167,43 @@ fn scan_dir_sync(
         })
         .collect();
 
-    images.sort_by(|a, b| {
-        let ordering = match sort_mode {
-            SortMode::Name => {
-                let a_name = a.file_name().and_then(|name| name.to_str()).unwrap_or("");
-                let b_name = b.file_name().and_then(|name| name.to_str()).unwrap_or("");
-                natural_cmp(a_name, b_name)
-            }
-            SortMode::Date => {
-                let a_time = fs::metadata(a)
-                    .and_then(|meta| meta.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                let b_time = fs::metadata(b)
-                    .and_then(|meta| meta.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                a_time.cmp(&b_time)
-            }
-            SortMode::Size => {
-                let a_size = fs::metadata(a).map_or(0, |meta| meta.len());
-                let b_size = fs::metadata(b).map_or(0, |meta| meta.len());
-                a_size.cmp(&b_size)
-            }
-        };
+    match sort_mode {
+        SortMode::Name => images.sort_by(|a, b| {
+            let a_name = a.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let b_name = b.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            natural_cmp(a_name, b_name)
+        }),
+        // Cache metadata keys to avoid repeated filesystem lookups.
+        SortMode::Date => images.sort_by_cached_key(|path| modified_time(path)),
+        SortMode::Size => images.sort_by_cached_key(|path| file_size(path)),
+    }
 
-        match sort_order {
-            SortOrder::Ascending => ordering,
-            SortOrder::Descending => ordering.reverse(),
-        }
-    });
+    if sort_order == SortOrder::Descending {
+        images.reverse();
+    }
 
     images
+}
+
+fn modified_time(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path).map_or(0, |meta| meta.len())
 }
 
 #[must_use]
 pub fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+        .is_some_and(|ext| {
+            EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
 }
 
 fn natural_cmp(a: &str, b: &str) -> Ordering {

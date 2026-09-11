@@ -3,6 +3,7 @@
 use cosmic::widget::image::Handle;
 use image::DynamicImage;
 use std::path::PathBuf;
+use std::sync::Arc;
 use viewer_core::{CachedImage, ImageCache};
 
 fn dummy_cached(w: u32, h: u32) -> CachedImage {
@@ -11,7 +12,7 @@ fn dummy_cached(w: u32, h: u32) -> CachedImage {
     let handle = Handle::from_rgba(w, h, rgba.into_raw());
     CachedImage {
         handle,
-        image: img,
+        image: Arc::new(img),
         width: w,
         height: h,
     }

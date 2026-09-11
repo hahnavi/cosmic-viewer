@@ -13,7 +13,7 @@ use std::{
 #[derive(Clone)]
 pub struct CachedImage {
     pub handle: Handle,
-    pub image: DynamicImage,
+    pub image: Arc<DynamicImage>,
     pub width: u32,
     pub height: u32,
 }

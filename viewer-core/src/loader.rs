@@ -10,8 +10,10 @@ use std::{
     fs::{self, File},
     io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock},
 };
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use turbojpeg::{Decompressor, Image, PixelFormat, ScalingFactor};
 use zune_image::codecs::bmp::zune_core::colorspace::ColorSpace;
 use zune_image::image::Image as ZuneImage;
@@ -19,6 +21,14 @@ use zune_image::image::Image as ZuneImage;
 // Cap texture uploads at 2048px on the long edge; the full-resolution image
 // is kept separately so edits and saves operate on the real pixels, not the texture.
 const MAX_TEX: u32 = 2048;
+
+/// Limit concurrent full-resolution thumbnail decodes to reduce memory use.
+static THUMBNAIL_DECODE_LIMIT: LazyLock<Semaphore> = LazyLock::new(|| {
+    let permits = std::thread::available_parallelism()
+        .map_or(2, std::num::NonZeroUsize::get)
+        .clamp(2, 4);
+    Semaphore::new(permits)
+});
 
 #[derive(Debug, Error)]
 pub enum LoadError {
@@ -35,7 +45,7 @@ pub enum LoadError {
 #[derive(Clone)]
 pub struct LoadedImage {
     pub handle: Handle,
-    pub image: DynamicImage,
+    pub image: Arc<DynamicImage>,
     pub width: u32,
     pub height: u32,
     pub path: PathBuf,
@@ -52,15 +62,17 @@ impl Debug for LoadedImage {
     }
 }
 
-// Display texture, downscaled to MAX_TEX. The source image is left full-res.
-fn display_handle(image: &DynamicImage) -> Handle {
-    let rgba = image.to_rgba8();
-    let (width, height) = rgba.dimensions();
+/// Display texture, downscaled to `MAX_TEX`. The source image is left full-res.
+/// Shared with `viewer-canvas` for display texture resizing.
+#[must_use]
+pub fn display_handle(image: &DynamicImage) -> Handle {
+    let (width, height) = (image.width(), image.height());
     if (width > MAX_TEX || height > MAX_TEX)
-        && let Ok((tw, th, pixels)) = fast_resize_rgba(rgba.as_raw(), width, height, MAX_TEX)
+        && let Ok((tw, th, pixels)) = fast_resize(image, MAX_TEX)
     {
         return Handle::from_rgba(tw, th, pixels);
     }
+    let rgba = image.to_rgba8();
     Handle::from_rgba(width, height, rgba.into_raw())
 }
 
@@ -113,17 +125,7 @@ fn load_image_sync(path: &Path) -> Result<LoadedImage, LoadError> {
     }
 
     // Standard image formats via the 'image' crate
-    let img = image::open(path)?;
-    let (width, height) = (img.width(), img.height());
-    let handle = display_handle(&img);
-
-    Ok(LoadedImage {
-        handle,
-        image: img,
-        width,
-        height,
-        path: path.to_path_buf(),
-    })
+    load_with_image(path)
 }
 
 /// Load full JPEG using turbojpeg (faster than zune/image crate)
@@ -162,16 +164,8 @@ fn load_jpeg_full(path: &Path) -> Result<LoadedImage, LoadError> {
 
     let rgba_image = RgbaImage::from_raw(width as u32, height as u32, pixels)
         .expect("pixel buffer matches dimensions");
-    let image = DynamicImage::ImageRgba8(rgba_image);
-    let handle = display_handle(&image);
 
-    Ok(LoadedImage {
-        handle,
-        image,
-        width: width as u32,
-        height: height as u32,
-        path: path.to_path_buf(),
-    })
+    Ok(finish_loaded(DynamicImage::ImageRgba8(rgba_image), path))
 }
 
 fn is_zune_supported(extension: &str) -> bool {
@@ -212,30 +206,12 @@ fn load_with_zune(path: &Path) -> Result<LoadedImage, LoadError> {
 
     let rgba_image = RgbaImage::from_raw(width as u32, height as u32, pixels)
         .expect("pixel buffer matches dimensions");
-    let image = DynamicImage::ImageRgba8(rgba_image);
-    let handle = display_handle(&image);
 
-    Ok(LoadedImage {
-        handle,
-        image,
-        width: width as u32,
-        height: height as u32,
-        path: path.to_path_buf(),
-    })
+    Ok(finish_loaded(DynamicImage::ImageRgba8(rgba_image), path))
 }
 
 fn load_with_image(path: &Path) -> Result<LoadedImage, LoadError> {
-    let img = image::open(path)?;
-    let (width, height) = (img.width(), img.height());
-    let handle = display_handle(&img);
-
-    Ok(LoadedImage {
-        handle,
-        image: img,
-        width,
-        height,
-        path: path.to_path_buf(),
-    })
+    Ok(finish_loaded(image::open(path)?, path))
 }
 
 /// Decode the image at `path` and downscale it to fit `max_size` on its longest
@@ -246,6 +222,11 @@ fn load_with_image(path: &Path) -> Result<LoadedImage, LoadError> {
 /// Returns [`LoadError`] if the file cannot be read, the format is unsupported
 /// or fails to decode, or the decode task is cancelled before completion.
 pub async fn load_thumbnail(path: PathBuf, max_size: u32) -> Result<LoadedImage, LoadError> {
+    let _permit = THUMBNAIL_DECODE_LIMIT
+        .acquire()
+        .await
+        .map_err(|_| LoadError::Cancelled)?;
+
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     rayon::spawn(move || {
@@ -271,84 +252,81 @@ fn load_thumbnail_sync(path: &Path, max_size: u32) -> Result<LoadedImage, LoadEr
         if loaded.width <= max_size && loaded.height <= max_size {
             return Ok(loaded);
         }
-        let pixels = loaded.image.to_rgba8().into_raw();
-        let (w, h, resized) = fast_resize_rgba(&pixels, loaded.width, loaded.height, max_size)?;
-        let handle = Handle::from_rgba(w, h, resized.clone());
-        let rgba_image =
-            RgbaImage::from_raw(w, h, resized).expect("pixel buffer matches dimensions");
-        return Ok(LoadedImage {
-            handle,
-            image: DynamicImage::ImageRgba8(rgba_image),
-            width: w,
-            height: h,
-            path: path.to_path_buf(),
-        });
+        return resized_thumbnail(&loaded.image, max_size, path);
     }
 
     // 1. For JPEGs, try EXIF thumbnail extraction (no full decode)
     if matches!(extension.as_str(), "jpg" | "jpeg") {
-        if let Ok((width, height, pixels)) = extract_exif_thumbnail(path, max_size) {
-            let handle = Handle::from_rgba(width, height, pixels.clone());
-
-            let rgba_image = RgbaImage::from_raw(width, height, pixels)
-                .expect("pixel buffer matches dimensions");
-            let dynamic_image = DynamicImage::ImageRgba8(rgba_image);
-
-            return Ok(LoadedImage {
-                handle,
-                image: dynamic_image,
-                width,
-                height,
-                path: path.to_path_buf(),
-            });
+        if let Ok(image) = extract_exif_thumbnail(path) {
+            return finish_loaded_thumbnail(image, max_size, path);
         }
 
         // 2. For JPEGs without EXIF, use turbojpeg with DCT scaling (4-8x faster)
-        if let Ok((width, height, pixels)) = decode_jpeg_scaled(path, max_size) {
-            let handle = Handle::from_rgba(width, height, pixels.clone());
-
-            let rgba_image = RgbaImage::from_raw(width, height, pixels)
-                .expect("pixel buffer matches dimensions");
-            let dynamic_image = DynamicImage::ImageRgba8(rgba_image);
-
-            return Ok(LoadedImage {
-                handle,
-                image: dynamic_image,
-                width,
-                height,
-                path: path.to_path_buf(),
-            });
+        if let Ok(image) = decode_jpeg_scaled(path, max_size) {
+            return finish_loaded_thumbnail(image, max_size, path);
         }
     }
 
     // 3. Fall back to full decode + resize (non-JPEGs or if turbojpeg fails)
-    let (width, height, pixels) = if is_zune_supported(&extension) {
-        match decode_and_resize_zune(path, max_size) {
-            Ok(result) => result,
-            Err(_) => decode_and_resize_image(path, max_size)?,
+    let image = if is_zune_supported(&extension) {
+        match decode_zune_image(path) {
+            Ok(image) => image,
+            Err(_) => image::open(path)?,
         }
     } else {
-        decode_and_resize_image(path, max_size)?
+        image::open(path)?
     };
 
-    let handle = Handle::from_rgba(width, height, pixels.clone());
+    finish_loaded_thumbnail(image, max_size, path)
+}
 
+/// Build a [`LoadedImage`], downscaling oversized images to `max_size`.
+fn finish_loaded_thumbnail(
+    image: DynamicImage,
+    max_size: u32,
+    path: &Path,
+) -> Result<LoadedImage, LoadError> {
+    if image.width() <= max_size && image.height() <= max_size {
+        return Ok(finish_loaded(image, path));
+    }
+    resized_thumbnail(&image, max_size, path)
+}
+
+/// Build a [`LoadedImage`] from the downscaled pixels of a larger image.
+fn resized_thumbnail(
+    image: &DynamicImage,
+    max_size: u32,
+    path: &Path,
+) -> Result<LoadedImage, LoadError> {
+    let (width, height, pixels) = fast_resize(image, max_size)?;
+    let handle = Handle::from_rgba(width, height, pixels.clone());
     let rgba_image =
         RgbaImage::from_raw(width, height, pixels).expect("pixel buffer matches dimensions");
-    let dynamic_image = DynamicImage::ImageRgba8(rgba_image);
-
     Ok(LoadedImage {
         handle,
-        image: dynamic_image,
+        image: Arc::new(DynamicImage::ImageRgba8(rgba_image)),
         width,
         height,
         path: path.to_path_buf(),
     })
 }
 
+/// Build a [`LoadedImage`] by wrapping a fully decoded image and its display texture.
+fn finish_loaded(image: DynamicImage, path: &Path) -> LoadedImage {
+    let (width, height) = (image.width(), image.height());
+    let handle = display_handle(&image);
+    LoadedImage {
+        handle,
+        image: Arc::new(image),
+        width,
+        height,
+        path: path.to_path_buf(),
+    }
+}
+
 /// Extract embedded EXIF thumbnail from JPEG files.
 /// Reads only a small portion of the file rather than decoding it fully.
-fn extract_exif_thumbnail(path: &Path, max_size: u32) -> Result<(u32, u32, Vec<u8>), LoadError> {
+fn extract_exif_thumbnail(path: &Path) -> Result<DynamicImage, LoadError> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
 
@@ -369,21 +347,9 @@ fn extract_exif_thumbnail(path: &Path, max_size: u32) -> Result<(u32, u32, Vec<u
     // file and extract the thumbnail using the offset/length.
     let thumb_bytes = extract_thumbnail_bytes(path, &exif)?;
 
-    // Decode the embedded JPEG thumbnail
-    let img = image::load_from_memory_with_format(&thumb_bytes, image::ImageFormat::Jpeg)
-        .map_err(LoadError::Decode)?;
-
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-
-    // If thumbnail is already small enough, return it
-    if width <= max_size && height <= max_size {
-        return Ok((width, height, rgba.into_raw()));
-    }
-
-    // Resize if thumbnail is larger than requested
-    let pixels = rgba.into_raw();
-    fast_resize_rgba(&pixels, width, height, max_size)
+    // Decode the embedded JPEG thumbnail; the caller downscales it when needed.
+    image::load_from_memory_with_format(&thumb_bytes, image::ImageFormat::Jpeg)
+        .map_err(LoadError::Decode)
 }
 
 /// Extract raw thumbnail bytes from JPEG using EXIF offset/length
@@ -499,7 +465,7 @@ fn find_tiff_header_offset(file: &mut File) -> Result<u64, LoadError> {
 // JPEG header/scaled dimensions are far below u32::MAX, so the usize -> u32
 // casts cannot truncate.
 #[allow(clippy::cast_possible_truncation)]
-fn decode_jpeg_scaled(path: &Path, max_size: u32) -> Result<(u32, u32, Vec<u8>), LoadError> {
+fn decode_jpeg_scaled(path: &Path, max_size: u32) -> Result<DynamicImage, LoadError> {
     // Read the JPEG file
     let mut file = File::open(path)?;
     let mut jpeg_data = Vec::new();
@@ -543,15 +509,11 @@ fn decode_jpeg_scaled(path: &Path, max_size: u32) -> Result<(u32, u32, Vec<u8>),
         .decompress(&jpeg_data, output.as_deref_mut())
         .map_err(|e| LoadError::UnsupportedFormat(format!("JPEG decode error: {e}")))?;
 
-    let width = width as u32;
-    let height = height as u32;
+    let rgba_image = RgbaImage::from_raw(width as u32, height as u32, pixels)
+        .expect("pixel buffer matches dimensions");
 
-    // If the scaled image is still larger than max_size, do a final resize
-    if width > max_size || height > max_size {
-        return fast_resize_rgba(&pixels, width, height, max_size);
-    }
-
-    Ok((width, height, pixels))
+    // If the scaled image is still larger than max_size, the caller resizes it.
+    Ok(DynamicImage::ImageRgba8(rgba_image))
 }
 
 /// Calculate the best JPEG scaling factor to get close to target size
@@ -588,11 +550,11 @@ fn calculate_jpeg_scale(width: u32, height: u32, target: u32) -> ScalingFactor {
     ScalingFactor::ONE_EIGHTH
 }
 
-/// Decode and resize using zune, returns (width, height, `rgba_pixels`)
+/// Decode an image to RGBA using zune, without resizing.
 // Image dimensions originate from a decoded image header and are far below
 // u32::MAX, so the usize -> u32 casts cannot truncate.
 #[allow(clippy::cast_possible_truncation)]
-fn decode_and_resize_zune(path: &Path, max_size: u32) -> Result<(u32, u32, Vec<u8>), LoadError> {
+fn decode_zune_image(path: &Path) -> Result<DynamicImage, LoadError> {
     let mut img = ZuneImage::open(path).map_err(|e| LoadError::UnsupportedFormat(e.to_string()))?;
 
     img.convert_color(ColorSpace::RGBA)
@@ -606,74 +568,53 @@ fn decode_and_resize_zune(path: &Path, max_size: u32) -> Result<(u32, u32, Vec<u
         .next()
         .ok_or_else(|| LoadError::UnsupportedFormat("No pixel data".into()))?;
 
-    // If already small enough, return directly
-    if width <= max_size as usize && height <= max_size as usize {
-        return Ok((width as u32, height as u32, pixels));
-    }
-
-    fast_resize_rgba(&pixels, width as u32, height as u32, max_size)
+    let rgba_image = RgbaImage::from_raw(width as u32, height as u32, pixels)
+        .expect("pixel buffer matches dimensions");
+    Ok(DynamicImage::ImageRgba8(rgba_image))
 }
 
-/// Decode and resize using image crate, returns (width, height, `rgba_pixels`)
-fn decode_and_resize_image(path: &Path, max_size: u32) -> Result<(u32, u32, Vec<u8>), LoadError> {
-    let img = image::open(path)?;
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-
-    // If already small enough, return directly
-    if width <= max_size && height <= max_size {
-        return Ok((width, height, rgba.into_raw()));
-    }
-
-    let pixels = rgba.into_raw();
-    fast_resize_rgba(&pixels, width, height, max_size)
-}
-
-/// Fast RGBA image resize using SIMD-optimized `fast_image_resize` crate
-// Source dimensions are positive image sizes and `ratio` is in (0, 1], so the
-// scaled product is non-negative and within u32 range after rounding; the f32
-// round-trip is exact for realistic image sizes.
+/// Fit dimensions within `max_size` while preserving aspect ratio.
+// reason: positive dimensions and a bounded ratio keep the rounded results valid.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-fn fast_resize_rgba(
-    pixels: &[u8],
-    src_width: u32,
-    src_height: u32,
-    max_size: u32,
-) -> Result<(u32, u32, Vec<u8>), LoadError> {
-    // Calculate target dimensions maintaining aspect ratio
-    let (dst_width, dst_height) = if src_width > src_height {
-        let ratio = max_size as f32 / src_width as f32;
-        (max_size, (src_height as f32 * ratio).round() as u32)
-    } else {
-        let ratio = max_size as f32 / src_height as f32;
-        ((src_width as f32 * ratio).round() as u32, max_size)
-    };
+fn fit_dimensions(src_width: u32, src_height: u32, max_size: u32) -> (u32, u32) {
+    if src_width <= max_size && src_height <= max_size {
+        return (src_width.max(1), src_height.max(1));
+    }
 
-    // Ensure dimensions are at least 1
-    let dst_width = dst_width.max(1);
-    let dst_height = dst_height.max(1);
+    let ratio = max_size as f32 / src_width.max(src_height) as f32;
+    (
+        ((src_width as f32 * ratio).round() as u32).max(1),
+        ((src_height as f32 * ratio).round() as u32).max(1),
+    )
+}
 
-    // Create source image from pixel data
-    let src_image = FirImage::from_vec_u8(src_width, src_height, pixels.to_vec(), PixelType::U8x4)
-        .map_err(|e| LoadError::UnsupportedFormat(e.to_string()))?;
+/// Resize an image with SIMD acceleration, converting non-RGBA inputs first.
+fn fast_resize(image: &DynamicImage, max_size: u32) -> Result<(u32, u32, Vec<u8>), LoadError> {
+    let (src_width, src_height) = (image.width(), image.height());
+    let (dst_width, dst_height) = fit_dimensions(src_width, src_height, max_size);
 
     let mut dst_image = FirImage::new(dst_width, dst_height, PixelType::U8x4);
 
-    // Resize with bilinear algorithm (good balance of speed and quality for thumbnails)
+    // Bilinear filtering balances resize speed and quality.
+    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(
+        fast_image_resize::FilterType::Bilinear,
+    ));
+
     let mut resizer = Resizer::new();
-    resizer
-        .resize(
-            &src_image,
-            &mut dst_image,
-            Some(&ResizeOptions::new().resize_alg(ResizeAlg::Convolution(
-                fast_image_resize::FilterType::Bilinear,
-            ))),
-        )
-        .map_err(|e| LoadError::UnsupportedFormat(e.to_string()))?;
+    if let DynamicImage::ImageRgba8(rgba) = image {
+        resizer
+            .resize(rgba, &mut dst_image, Some(&options))
+            .map_err(|e| LoadError::UnsupportedFormat(e.to_string()))?;
+    } else {
+        let rgba = image.to_rgba8();
+        resizer
+            .resize(&rgba, &mut dst_image, Some(&options))
+            .map_err(|e| LoadError::UnsupportedFormat(e.to_string()))?;
+    }
 
     Ok((dst_width, dst_height, dst_image.into_vec()))
 }
@@ -733,16 +674,8 @@ fn load_svg_at(path: &Path, max: u32) -> Result<LoadedImage, LoadError> {
     let (w, h) = svg_fit_dimensions(&tree, max);
     let pixels = render_svg(&tree, w, h)?;
 
-    let handle = Handle::from_rgba(w, h, pixels.clone());
     let rgba_image = RgbaImage::from_raw(w, h, pixels).expect("pixel buffer matches dimensions");
-
-    Ok(LoadedImage {
-        handle,
-        image: DynamicImage::ImageRgba8(rgba_image),
-        width: w,
-        height: h,
-        path: path.to_path_buf(),
-    })
+    Ok(finish_loaded(DynamicImage::ImageRgba8(rgba_image), path))
 }
 
 fn load_heif(path: &Path) -> Result<LoadedImage, LoadError> {
@@ -793,17 +726,10 @@ fn load_heif(path: &Path) -> Result<LoadedImage, LoadError> {
         pixels.extend_from_slice(&plane.data[row_start..row_start + row_bytes]);
     }
 
-    let handle_rgba = Handle::from_rgba(width, height, pixels.clone());
     let rgba_image =
         RgbaImage::from_raw(width, height, pixels).expect("pixel buffer matches dimensions");
 
-    Ok(LoadedImage {
-        handle: handle_rgba,
-        image: DynamicImage::ImageRgba8(rgba_image),
-        width,
-        height,
-        path: path.to_path_buf(),
-    })
+    Ok(finish_loaded(DynamicImage::ImageRgba8(rgba_image), path))
 }
 
 /// Read DPI from EXIF data (JPEG/TIFF only)

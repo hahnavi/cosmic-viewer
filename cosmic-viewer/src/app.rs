@@ -274,23 +274,23 @@ impl CosmicViewer {
             .and_then(|path| self.cache.get_full(path))
             .map(|cached| cached.image);
 
-        if let Some(mut base) = original {
+        if let Some(original) = original {
+            let mut base = original;
             for op in self.viewport.operations() {
                 if let Some(rotate) = op.as_any().downcast_ref::<RotateOperation>() {
-                    base = match rotate.direction {
+                    base = Arc::new(match rotate.direction {
                         RotateDirection::Left => base.rotate270(),
                         RotateDirection::Right => base.rotate90(),
-                    };
+                    });
                 } else if let Some(crop) = op.as_any().downcast_ref::<CropOperation>() {
-                    base = crop_to_region(&base, crop.region);
+                    base = Arc::new(crop_to_region(&base, crop.region));
                 }
             }
 
-            if let Some(img) = self.viewport.working_image_mut() {
-                *img = base;
+            if self.viewport.working_image().is_some() {
+                self.viewport.set_working_image(base);
+                self.viewport.rebuild_display();
             }
-
-            self.viewport.rebuild_display();
         }
     }
 
@@ -1036,28 +1036,38 @@ impl CosmicViewer {
         toolbar.view()
     }
 
-    fn flatten_image(&self) -> Option<DynamicImage> {
-        if let Some(working) = self.viewport.working_image() {
-            // `working_image` already has the geometric ops (rotate/crop) baked in by
-            // `rebuild_working_image`/`CropApply`. Re-applying them here would double-crop or
-            // double-rotate the saved file, so flatten only the overlay (annotation) ops on top.
-            let mut image = working.clone();
-            for op in self.viewport.operations() {
-                if op.as_any().is::<RotateOperation>() || op.as_any().is::<CropOperation>() {
-                    continue;
-                }
-                op.apply(&mut image);
-            }
-            Some(image)
+    /// Flatten the committed overlay operations into a copy of the current
+    /// pixels. Geometric ops (rotate/crop) are already baked into `working_image`
+    /// by `rebuild_working_image`/`CropApply`, so re-applying them here would
+    /// double-crop or double-rotate the saved file. When there is nothing to
+    /// apply, the shared pixel buffer is returned without copying.
+    fn flatten_image(&self) -> Option<Arc<DynamicImage>> {
+        let mut image = if let Some(working) = self.viewport.working_image() {
+            Arc::clone(working)
         } else {
             // No baked working image (nothing edited): flatten every op onto the cached original.
             let current = self.nav.current()?;
-            let mut image = self.cache.get_full(current)?.image;
+            self.cache.get_full(current)?.image
+        };
+
+        let is_overlay = |op: &dyn ToolOperation| {
+            !(op.as_any().is::<RotateOperation>() || op.as_any().is::<CropOperation>())
+        };
+        if self
+            .viewport
+            .operations()
+            .iter()
+            .any(|op| is_overlay(op.as_ref()))
+        {
+            let image = Arc::make_mut(&mut image);
             for op in self.viewport.operations() {
-                op.apply(&mut image);
+                if is_overlay(op.as_ref()) {
+                    op.apply(image);
+                }
             }
-            Some(image)
         }
+
+        Some(image)
     }
 
     fn build_shape_selector(&self) -> Element<'_, ViewerMessage> {
@@ -2637,7 +2647,7 @@ impl Application for CosmicViewer {
                     }
 
                     self.rebuild_nav_handles();
-                    if !self.nav.is_empty() {
+                    if !self.nav.is_empty() && self.core().nav_bar_active() {
                         let idx = self.nav.index().unwrap_or(0);
                         tasks.push(self.load_nearby_thumbnails(idx, 10));
                     }
@@ -2739,18 +2749,28 @@ impl Application for CosmicViewer {
                         // visible until the new one loads
 
                         tasks.push(self.load_full_image(path));
-                        let images = self.nav.images().to_vec();
-                        for (adj_idx, adj_path) in images.iter().enumerate() {
-                            // distance from the just-activated image to this neighbor;
-                            // skip the activated image itself, which is loaded above.
-                            let dist = idx.abs_diff(adj_idx);
-                            if dist != 0
-                                && dist <= 1
-                                && self.cache.get_full(adj_path).is_none()
-                                && !self.cache.is_pending(adj_path)
+
+                        // Prefetch only the immediate neighbors, then evict images
+                        // further out. Iterating by index avoids cloning the whole
+                        // file list on every navigation.
+                        let total = self.nav.total();
+                        let mut adjacent = Vec::with_capacity(2);
+                        if idx > 0 {
+                            adjacent.push(self.nav.images()[idx - 1].clone());
+                        }
+                        if idx + 1 < total {
+                            adjacent.push(self.nav.images()[idx + 1].clone());
+                        }
+                        for adj_path in adjacent {
+                            if self.cache.get_full(&adj_path).is_none()
+                                && !self.cache.is_pending(&adj_path)
                             {
-                                tasks.push(self.load_full_image(adj_path.clone()));
-                            } else if dist > 2 {
+                                tasks.push(self.load_full_image(adj_path));
+                            }
+                        }
+
+                        for (adj_idx, adj_path) in self.nav.images().iter().enumerate() {
+                            if adj_idx.abs_diff(idx) > 2 {
                                 self.cache.remove_full(adj_path);
                             }
                         }
@@ -2790,7 +2810,7 @@ impl Application for CosmicViewer {
                         self.nav.set_images(dir, images, selected.as_deref());
                         self.rebuild_nav_handles();
 
-                        if !self.nav.is_empty() {
+                        if !self.nav.is_empty() && self.core().nav_bar_active() {
                             let idx = self.nav.index().unwrap_or(0);
                             tasks.push(self.load_nearby_thumbnails(idx, 10));
                         }
@@ -2832,7 +2852,9 @@ impl Application for CosmicViewer {
                                 );
                             }
                         }
-                        tasks.push(self.load_nearby_thumbnails(idx, 5));
+                        if self.core().nav_bar_active() {
+                            tasks.push(self.load_nearby_thumbnails(idx, 5));
+                        }
                     }
                 }
                 ImageMessage::LoadError(path) => {

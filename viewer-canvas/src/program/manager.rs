@@ -15,36 +15,25 @@ use cosmic::{
         mouse::{self, Button, Cursor, Event as MouseEvent},
         overlay,
     },
-    widget::{self, Operation, Widget, canvas::Cache, image::Handle},
+    widget::{self, Operation, Widget, canvas::Cache},
 };
 use image::DynamicImage;
 use std::cell::Cell;
+use std::sync::Arc;
 use viewer_tools::{
     ToolOperation,
     crop::{CropSelection, DragHandle},
 };
-
-const MAX_TEX: u32 = 2048;
-
-// Display texture, downscaled to MAX_TEX. The source image is left full-res.
-fn display_handle(image: &DynamicImage) -> Handle {
-    let rgba = if image.width() > MAX_TEX || image.height() > MAX_TEX {
-        image
-            .resize(MAX_TEX, MAX_TEX, image::imageops::FilterType::Triangle)
-            .to_rgba8()
-    } else {
-        image.to_rgba8()
-    };
-    let (width, height) = rgba.dimensions();
-    Handle::from_rgba(width, height, rgba.into_raw())
-}
 
 /// Orchestrator that owns the canvas state, edit operations, and undo/redo history.
 pub struct ViewportManager {
     image: Option<CanvasImage>,
     cache: Cache,
     dirty: Cell<bool>,
-    working_image: Option<DynamicImage>,
+    working_image: Option<Arc<DynamicImage>>,
+    /// Version of the working pixels, used to skip redundant display rebuilds.
+    working_version: u64,
+    display_version: u64,
     zoom: f32,
     pan: Vector,
     active_tool: Option<ToolKind>,
@@ -72,6 +61,8 @@ impl ViewportManager {
             cache: Cache::new(),
             dirty: Cell::new(false),
             working_image: None,
+            working_version: 0,
+            display_version: 0,
             zoom: 1.0,
             pan: Vector::ZERO,
             active_tool: None,
@@ -96,7 +87,7 @@ impl ViewportManager {
         &mut self.operations
     }
 
-    pub fn set_image(&mut self, image: Option<CanvasImage>, base: Option<DynamicImage>) {
+    pub fn set_image(&mut self, image: Option<CanvasImage>, base: Option<Arc<DynamicImage>>) {
         let image = match (image, base.as_ref()) {
             (Some(mut img), Some(base)) => {
                 img.width = base.width();
@@ -107,6 +98,8 @@ impl ViewportManager {
         };
         self.image = image;
         self.working_image = base;
+        self.touch_working();
+        self.display_version = self.working_version;
         self.zoom = 1.0;
         self.pan = Vector::ZERO;
         self.active_preview = None;
@@ -119,14 +112,14 @@ impl ViewportManager {
         self.image.as_ref()
     }
 
-    pub fn rebuild_image(&mut self, original: &DynamicImage) {
-        let mut working = original.clone();
+    pub fn rebuild_image(&mut self, original: &Arc<DynamicImage>) {
+        let mut working = Arc::clone(original);
         for op in &self.operations {
-            op.apply(&mut working);
+            op.apply(Arc::make_mut(&mut working));
         }
 
         let (width, height) = (working.width(), working.height());
-        let handle = display_handle(&working);
+        let handle = viewer_core::display_handle(&working);
         self.image = Some(CanvasImage {
             handle,
             width,
@@ -138,26 +131,48 @@ impl ViewportManager {
         self.operations.clear();
         self.redo_stack.clear();
         self.working_image = Some(working);
+        self.touch_working();
+        self.display_version = self.working_version;
     }
 
+    /// Rebuild the display texture when the working pixels change.
     pub fn rebuild_display(&mut self) {
-        if let Some(ref working) = self.working_image {
-            let (width, height) = (working.width(), working.height());
-            let handle = display_handle(working);
-            self.image = Some(CanvasImage {
-                handle,
-                width,
-                height,
-            });
+        let Some(ref working) = self.working_image else {
+            return;
+        };
+        if self.image.is_some() && self.display_version == self.working_version {
+            return;
         }
+
+        let (width, height) = (working.width(), working.height());
+        let handle = viewer_core::display_handle(working);
+        self.image = Some(CanvasImage {
+            handle,
+            width,
+            height,
+        });
+        self.display_version = self.working_version;
     }
 
-    pub const fn working_image(&self) -> Option<&DynamicImage> {
+    /// Mark the working pixels as changed, invalidating the display texture.
+    const fn touch_working(&mut self) {
+        self.working_version = self.working_version.wrapping_add(1);
+    }
+
+    pub const fn working_image(&self) -> Option<&Arc<DynamicImage>> {
         self.working_image.as_ref()
     }
 
-    pub const fn working_image_mut(&mut self) -> Option<&mut DynamicImage> {
-        self.working_image.as_mut()
+    /// Access working pixels mutably, cloning shared data when needed.
+    pub fn working_image_mut(&mut self) -> Option<&mut DynamicImage> {
+        self.touch_working();
+        self.working_image.as_mut().map(Arc::make_mut)
+    }
+
+    /// Replace working pixels without rebuilding the display texture.
+    pub fn set_working_image(&mut self, image: Arc<DynamicImage>) {
+        self.working_image = Some(image);
+        self.touch_working();
     }
 
     pub const fn zoom(&self) -> f32 {
@@ -305,6 +320,7 @@ impl ViewportManager {
         self.redo_stack.clear();
         self.active_preview = None;
         self.working_image = None;
+        self.touch_working();
     }
 
     /// Set the active tool's live preview; not committed to undo stack.
@@ -458,6 +474,54 @@ impl ViewportManager {
     /// Build the element for use in `view()`
     pub fn element(&self) -> Element<'_, CanvasMessage> {
         Element::new(Viewport { manager: self })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_image(width: u32, height: u32) -> Arc<DynamicImage> {
+        Arc::new(DynamicImage::new_rgba8(width, height))
+    }
+
+    #[test]
+    fn rebuild_display_reuses_texture_when_pixels_unchanged() {
+        let mut manager = ViewportManager::new();
+        let base = base_image(64, 64);
+        let handle = viewer_core::display_handle(&base);
+        manager.set_image(
+            Some(CanvasImage {
+                handle,
+                width: 64,
+                height: 64,
+            }),
+            Some(Arc::clone(&base)),
+        );
+
+        let before = manager.image().unwrap().handle.id();
+
+        // Overlay-only updates call this unconditionally; the texture must be reused.
+        manager.rebuild_display();
+        assert_eq!(
+            manager.image().unwrap().handle.id(),
+            before,
+            "unchanged working pixels must not rebuild the display texture"
+        );
+
+        // A pixel change must invalidate the cached texture.
+        manager
+            .working_image_mut()
+            .unwrap()
+            .as_mut_rgba8()
+            .unwrap()
+            .put_pixel(0, 0, image::Rgba([1, 2, 3, 4]));
+        manager.rebuild_display();
+        assert_ne!(
+            manager.image().unwrap().handle.id(),
+            before,
+            "changed working pixels must rebuild the display texture"
+        );
     }
 }
 
