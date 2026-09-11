@@ -15,7 +15,7 @@ use cosmic::{
     widget::icon,
 };
 use std::{
-    env::{args, var},
+    env::args,
     path::PathBuf,
     sync::{Mutex, OnceLock},
 };
@@ -37,17 +37,7 @@ fn main() -> cosmic::iced::Result {
         .size_limits(Limits::NONE.min_width(360.0).min_height(300.0));
 
     // Get the image if opened from the file manager or cli
-    let mut optional_image = args().nth(1).map(PathBuf::from);
-
-    // Make /home/$USER/Pictures the default directory to open to.
-    if optional_image.is_none() {
-        optional_image = Some(
-            var("HOME")
-                .map(PathBuf::from)
-                .expect("/home/$USER should exist")
-                .join("Pictures"),
-        );
-    }
+    let optional_image = args().nth(1).map(PathBuf::from);
 
     run::<CosmicViewer>(settings, optional_image)
 }

@@ -166,7 +166,7 @@ impl Default for ViewerConfig {
             sort_order: SortOrder::default(),
             last_color: None,
             app_theme: AppTheme::System,
-            show_navbar: true,
+            show_navbar: false,
         }
     }
 }
