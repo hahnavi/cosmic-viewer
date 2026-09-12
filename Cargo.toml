@@ -66,3 +66,6 @@ features = [
   "rfd",
 ]
 git = "https://github.com/pop-os/libcosmic.git"
+
+[patch."https://github.com/pop-os/libcosmic.git"]
+libcosmic = { git = "https://github.com/hahnavi/libcosmic.git", rev = "7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a" }

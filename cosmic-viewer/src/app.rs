@@ -55,7 +55,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 use viewer_canvas::{CanvasImage, CanvasMessage, ToolKind, ViewportManager};
@@ -119,7 +119,7 @@ pub struct CosmicViewer {
     move_mode: bool,
     move_target: Option<usize>,
     move_start: Option<Point>,
-    font_families: Vec<&'static str>,
+    font_families: OnceLock<Vec<&'static str>>,
     text_font_family: &'static str,
     text_font_index: Option<usize>,
     text_font_size: f32,
@@ -146,10 +146,36 @@ pub struct CosmicViewer {
     watcher_rescan_pending: bool,
     was_narrow: bool,
     toasts: Toasts<ViewerMessage>,
-    about: About,
+    about: OnceLock<About>,
 }
 
 impl CosmicViewer {
+    /// Font families, loaded lazily because scanning installed fonts is only needed for text.
+    fn font_families(&self) -> &[&'static str] {
+        self.font_families.get_or_init(load_font_families)
+    }
+
+    /// About dialog metadata. Built lazily so icon lookup does not slow startup.
+    fn about(&self) -> &About {
+        self.about.get_or_init(|| {
+            About::default()
+                .name(fl!("app-name"))
+                .icon(icon::from_name(Self::APP_ID))
+                .version(env!("CARGO_PKG_VERSION"))
+                .author("System76")
+                .comments(fl!("app-description"))
+                .license("GPL-3.0-only")
+                .developers([("System76", "info@system76.com")])
+                .links([
+                    (fl!("repository"), "https://github.com/pop-os/cosmic-viewer"),
+                    (
+                        fl!("support"),
+                        "https://github.com/pop-os/cosmic-viewer/issues",
+                    ),
+                ])
+        })
+    }
+
     /// The current image has committed edits (crop/rotate/annotations) not yet saved.
     fn has_unsaved_edits(&self) -> bool {
         !self.viewport.operations().is_empty()
@@ -1200,8 +1226,15 @@ impl CosmicViewer {
                 .iter()
                 .position(|pt| (pt_to_px(*pt) - self.text_font_size).abs() < 0.01);
 
+            // Derive the initial index from the active family when the menu opens.
+            let font_index = self.text_font_index.or_else(|| {
+                self.font_families()
+                    .iter()
+                    .position(|&f| f == self.text_font_family)
+            });
+
             let font_row = Row::new()
-                .push(dropdown(&self.font_families, self.text_font_index, |idx| {
+                .push(dropdown(self.font_families(), font_index, |idx| {
                     ViewerMessage::Edit(EditMessage::TextFontFamily(idx))
                 }))
                 .push(dropdown(&FONT_SIZE_LABELS, font_size_selected, |idx| {
@@ -1409,12 +1442,10 @@ impl Application for CosmicViewer {
 
         let scroll_id = Id::unique();
 
-        let families = load_font_families();
         let default_family = match cosmic::font::default().family {
             font::Family::Name(name) => name,
             _ => "Sans",
         };
-        let font_index = families.iter().position(|&fam| fam == default_family);
 
         let initial_color = config
             .last_color
@@ -1445,7 +1476,7 @@ impl Application for CosmicViewer {
             move_mode: false,
             move_target: None,
             move_start: None,
-            font_families: load_font_families(),
+            font_families: OnceLock::new(),
             shape_popup: false,
             stroke_popup: false,
             color_picker: cosmic::widget::ColorPickerModel::new(
@@ -1459,7 +1490,7 @@ impl Application for CosmicViewer {
             has_custom_color: false,
             selected_shape: AnnotateTool::Rectangle,
             text_font_family: default_family,
-            text_font_index: font_index,
+            text_font_index: None,
             text_font_size: pt_to_px(24.0),
             text_bold: false,
             text_italic: false,
@@ -1505,21 +1536,7 @@ impl Application for CosmicViewer {
             watcher_rescan_pending: false,
             was_narrow: false,
             toasts: Toasts::new(ViewerMessage::CloseToast),
-            about: About::default()
-                .name(fl!("app-name"))
-                .icon(icon::from_name(Self::APP_ID))
-                .version(env!("CARGO_PKG_VERSION"))
-                .author("System76")
-                .comments(fl!("app-description"))
-                .license("GPL-3.0-only")
-                .developers([("System76", "info@system76.com")])
-                .links([
-                    (fl!("repository"), "https://github.com/pop-os/cosmic-viewer"),
-                    (
-                        fl!("support"),
-                        "https://github.com/pop-os/cosmic-viewer/issues",
-                    ),
-                ]),
+            about: OnceLock::new(),
         };
 
         if let Some(path) = flags {
@@ -1549,8 +1566,9 @@ impl Application for CosmicViewer {
         let content = match page {
             ContextMessage::ImageDetails => self.image_details_page(),
             ContextMessage::About => {
+                let about = self.about();
                 return Some(context_drawer::about(
-                    &self.about,
+                    about,
                     |s| Self::Message::LaunchUrl(s.to_string()),
                     Self::Message::Context(ContextMessage::About),
                 ));
@@ -2569,8 +2587,11 @@ impl Application for CosmicViewer {
                         self.text_alignment = t.alignment;
                         self.text_font_size = t.font_size;
                         self.text_font_family = t.font_family;
-                        self.text_font_index =
-                            self.font_families.iter().position(|&f| f == t.font_family);
+                        self.text_font_index = self
+                            .font_families
+                            .get_or_init(load_font_families)
+                            .iter()
+                            .position(|&f| f == t.font_family);
                         self.annotate_color = AnnotateColor(t.color);
                     }
                     self.sync_text_format_models();
@@ -3010,6 +3031,7 @@ impl Application for CosmicViewer {
                                     self.text_font_family = t.font_family;
                                     self.text_font_index = self
                                         .font_families
+                                        .get_or_init(load_font_families)
                                         .iter()
                                         .position(|&font| font == t.font_family);
                                     self.annotate_color = AnnotateColor(t.color);
@@ -3736,7 +3758,7 @@ impl Application for CosmicViewer {
                     }
                     EditMessage::TextFontFamily(idx) => {
                         self.text_font_index = Some(idx);
-                        let fam = self.font_families[idx];
+                        let fam = self.font_families()[idx];
                         self.text_font_family = fam;
                         if let Some(preview) = self.viewport.preview_mut()
                             && let Some(text) = preview.as_any_mut().downcast_mut::<TextPreview>()
