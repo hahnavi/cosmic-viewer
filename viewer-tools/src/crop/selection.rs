@@ -442,7 +442,7 @@ impl CropSelection {
 
     fn draw_handles(&self, frame: &mut Frame<Renderer>, handle_size: f32, accent: Color) {
         let region = self.region;
-        let bar_long = (handle_size * HANDLE_BAR_RATIO);
+        let bar_long = handle_size * HANDLE_BAR_RATIO;
         let bar_short = handle_size * HANDLE_THICKNESS_RATIO;
         let bar_long_horz = bar_long.min(region.width);
         let bar_long_vert = bar_long.min(region.height);

@@ -1192,22 +1192,3 @@ fn i_minus_r(v: Vector, steps: u8) -> Vector {
     };
     Vector::new(v.x - rv.x, v.y - rv.y)
 }
-
-fn draw_handle(
-    frame: &mut Frame<Renderer>,
-    center: Point,
-    w: f32,
-    h: f32,
-    anchor_x: f32,
-    anchor_y: f32,
-    color: Color,
-) {
-    let rect = Rectangle::new(
-        Point::new(
-            w.mul_add(-anchor_x, center.x),
-            h.mul_add(-anchor_y, center.y),
-        ),
-        Size::new(w, h),
-    );
-    frame.fill_rectangle(rect.position(), rect.size(), Fill::from(color));
-}
