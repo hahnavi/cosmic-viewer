@@ -16,7 +16,7 @@ use cosmic::{
         overlay,
         time::Instant,
     },
-    widget::{self, Operation, Widget, canvas::Cache},
+    widget::{self, Operation, Widget, canvas::Cache, image::Handle},
 };
 use image::DynamicImage;
 use std::cell::Cell;
@@ -135,6 +135,23 @@ impl ViewportManager {
 
     pub const fn image(&self) -> Option<&CanvasImage> {
         self.image.as_ref()
+    }
+
+    pub fn set_texture(&mut self, handle: Handle) {
+        if let Some(image) = self.image.as_mut() {
+            image.handle = handle;
+            self.display_version = self.working_version.wrapping_sub(1);
+        }
+    }
+
+    pub fn set_full_image(&mut self, base: Arc<DynamicImage>) {
+        if let Some(image) = self.image.as_mut() {
+            image.width = base.width();
+            image.height = base.height();
+        }
+        self.working_image = Some(base);
+        self.touch_working();
+        self.display_version = self.working_version.wrapping_sub(1);
     }
 
     pub fn rebuild_image(&mut self, original: &Arc<DynamicImage>) {
@@ -918,6 +935,81 @@ mod tests {
         assert!(!manager.is_animating());
         assert!((manager.zoom() - 2.0).abs() < f32::EPSILON);
         assert!(!manager.tick(start + Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn set_texture_swaps_pixels_without_resetting_the_view() {
+        let viewport = Size::new(800.0, 800.0);
+        let mut manager = manager_with_image(1000, 1000, viewport);
+        manager.set_zoom(2.0);
+        manager.set_pan(Vector::new(30.0, 20.0));
+
+        let before = manager.image().unwrap().handle.id();
+        let frame = Handle::from_rgba(2, 2, vec![1, 2, 3, 4]);
+        let frame_id = frame.id();
+        manager.set_texture(frame);
+
+        let image = manager.image().unwrap();
+        assert_ne!(image.handle.id(), before, "texture must be replaced");
+        assert_eq!(image.handle.id(), frame_id, "the new frame is displayed");
+        assert!((manager.zoom() - 2.0).abs() < f32::EPSILON);
+        assert_eq!(manager.pan(), Vector::new(30.0, 20.0));
+    }
+
+    #[test]
+    fn set_texture_is_replaced_by_the_next_display_rebuild() {
+        let base = base_image(64, 64);
+        let handle = viewer_core::display_handle(&base);
+        let mut manager = ViewportManager::new();
+        manager.set_image(
+            Some(CanvasImage {
+                handle,
+                width: 64,
+                height: 64,
+            }),
+            Some(base),
+        );
+
+        let frame = Handle::from_rgba(2, 2, vec![9, 9, 9, 9]);
+        let frame_id = frame.id();
+        manager.set_texture(frame);
+        assert_eq!(manager.image().unwrap().handle.id(), frame_id);
+
+        manager.rebuild_display();
+        assert_ne!(
+            manager.image().unwrap().handle.id(),
+            frame_id,
+            "rebuilding must restore the working pixels over an animation frame"
+        );
+    }
+
+    #[test]
+    fn set_full_image_attaches_pixels_without_resetting_the_view() {
+        let preview = DynamicImage::new_rgba8(64, 64);
+        let handle = viewer_core::display_handle(&preview);
+        let mut manager = ViewportManager::new();
+        manager.set_image(
+            Some(CanvasImage {
+                handle,
+                width: 64,
+                height: 64,
+            }),
+            None,
+        );
+        manager.set_zoom(2.0);
+        manager.set_pan(Vector::new(10.0, 5.0));
+
+        manager.set_full_image(base_image(256, 256));
+
+        assert_eq!(manager.working_image().unwrap().width(), 256);
+        assert!((manager.zoom() - 2.0).abs() < f32::EPSILON);
+        assert_eq!(manager.pan(), Vector::new(10.0, 5.0));
+
+        // The preview texture no longer matches the full pixels; a rebuild
+        // must regenerate it.
+        let before = manager.image().unwrap().handle.id();
+        manager.rebuild_display();
+        assert_ne!(manager.image().unwrap().handle.id(), before);
     }
 }
 

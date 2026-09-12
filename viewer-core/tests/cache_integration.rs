@@ -12,9 +12,10 @@ fn dummy_cached(w: u32, h: u32) -> CachedImage {
     let handle = Handle::from_rgba(w, h, rgba.into_raw());
     CachedImage {
         handle,
-        image: Arc::new(img),
+        image: Some(Arc::new(img)),
         width: w,
         height: h,
+        animation: None,
     }
 }
 
@@ -35,6 +36,33 @@ fn insert_full_and_thumbnail_both_retrievable() {
     assert_eq!(full.height, 150);
 
     assert!(cache.get_thumbnail(&path).is_some(), "thumb cached");
+}
+
+#[test]
+fn thumbnail_cache_stays_within_its_byte_budget() {
+    let cache = ImageCache::with_defaults();
+    // 256 x 256 RGBA = 256 KiB per thumbnail; 200 of them would be 50 MiB if
+    // the cache only counted entries.
+    let pixels = vec![0u8; 256 * 256 * 4];
+    for i in 0..200 {
+        let path = PathBuf::from(format!("/tmp/cache-thumb-budget/{i}.jpg"));
+        cache.insert_thumbnail(path, Handle::from_rgba(256, 256, pixels.clone()));
+    }
+
+    let bytes = cache.thumbnail_bytes();
+    assert!(
+        bytes <= 32 * 1024 * 1024,
+        "thumbnail cache exceeded its byte budget: {bytes} bytes"
+    );
+    assert!(
+        bytes >= 16 * 1024 * 1024,
+        "thumbnail cache evicted too aggressively: {bytes} bytes"
+    );
+    // Removals keep the accounting honest.
+    let path = PathBuf::from("/tmp/cache-thumb-budget/199.jpg");
+    let before = cache.thumbnail_bytes();
+    cache.remove_thumbnail(&path);
+    assert!(cache.thumbnail_bytes() < before);
 }
 
 #[test]
@@ -164,6 +192,51 @@ fn remove_full_leaves_thumbnail() {
     cache.remove_full(&path);
     assert!(cache.get_full(&path).is_none());
     assert!(cache.get_thumbnail(&path).is_some());
+}
+
+#[test]
+fn release_full_pixels_keeps_display_textures() {
+    let cache = ImageCache::with_defaults();
+    let active = PathBuf::from("/tmp/cache-release/active.png");
+    let other = PathBuf::from("/tmp/cache-release/other.png");
+    cache.insert_full(active.clone(), dummy_cached(100, 100));
+    cache.insert_full(other.clone(), dummy_cached(100, 100));
+
+    cache.release_full_pixels_except(&active);
+
+    assert!(cache.get_full(&active).unwrap().image.is_some());
+    let released = cache
+        .get_full(&other)
+        .expect("display texture stays cached");
+    assert!(released.image.is_none(), "full pixels must be dropped");
+    assert_eq!(released.width, 100, "dimensions survive the release");
+}
+
+#[test]
+fn insert_preview_does_not_downgrade_full_pixels() {
+    let cache = ImageCache::with_defaults();
+    let path = PathBuf::from("/tmp/cache-preview/keep.png");
+    cache.insert_full(path.clone(), dummy_cached(100, 100));
+
+    cache.insert_preview(path.clone(), dummy_cached(10, 10));
+
+    let cached = cache.get_full(&path).expect("entry");
+    assert_eq!(cached.width, 100, "preview must not replace a full entry");
+    assert!(cached.image.is_some());
+}
+
+#[test]
+fn preview_pending_is_claimed_once() {
+    let cache = ImageCache::with_defaults();
+    let path = PathBuf::from("/tmp/cache-preview/claim.png");
+
+    assert!(cache.try_set_preview_pending(&path));
+    assert!(
+        !cache.try_set_preview_pending(&path),
+        "a second request must not start another decode"
+    );
+    cache.clear_pending_preview(&path);
+    assert!(cache.try_set_preview_pending(&path));
 }
 
 #[test]

@@ -743,7 +743,7 @@ dependencies = [
 [[package]]
 name = "build_helpers"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "cfg_aliases",
 ]
@@ -1077,7 +1077,20 @@ version = "0.2.0"
 source = "git+https://github.com/pop-os/cosmic-protocols?rev=32283d7#32283d76a8d0342da74c4cc022a533c52dcf378f"
 dependencies = [
  "bitflags 2.13.1",
- "cosmic-protocols",
+ "cosmic-protocols 0.2.0 (git+https://github.com/pop-os/cosmic-protocols?rev=32283d7)",
+ "libc",
+ "smithay-client-toolkit",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
+name = "cosmic-client-toolkit"
+version = "0.2.0"
+source = "git+https://github.com/pop-os/cosmic-protocols?rev=c0cff4d#c0cff4db14c37ed954983158e4055aa94c7741d9"
+dependencies = [
+ "bitflags 2.13.1",
+ "cosmic-protocols 0.2.0 (git+https://github.com/pop-os/cosmic-protocols?rev=c0cff4d)",
  "libc",
  "smithay-client-toolkit",
  "wayland-client",
@@ -1087,7 +1100,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config"
 version = "1.0.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "atomicwrites",
  "cosmic-config-derive",
@@ -1108,7 +1121,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config-derive"
 version = "1.0.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -1132,6 +1145,20 @@ dependencies = [
 name = "cosmic-protocols"
 version = "0.2.0"
 source = "git+https://github.com/pop-os/cosmic-protocols?rev=32283d7#32283d76a8d0342da74c4cc022a533c52dcf378f"
+dependencies = [
+ "bitflags 2.13.1",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "wayland-scanner",
+ "wayland-server",
+]
+
+[[package]]
+name = "cosmic-protocols"
+version = "0.2.0"
+source = "git+https://github.com/pop-os/cosmic-protocols?rev=c0cff4d#c0cff4db14c37ed954983158e4055aa94c7741d9"
 dependencies = [
  "bitflags 2.13.1",
  "wayland-backend",
@@ -1177,7 +1204,7 @@ dependencies = [
 [[package]]
 name = "cosmic-theme"
 version = "1.0.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "almost",
  "configparser",
@@ -2188,7 +2215,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.20",
- "windows 0.62.2",
+ "windows 0.56.0",
 ]
 
 [[package]]
@@ -2407,7 +2434,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.56.0",
 ]
 
 [[package]]
@@ -2422,7 +2449,7 @@ dependencies = [
 [[package]]
 name = "iced"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "build_helpers",
  "dnd",
@@ -2444,7 +2471,7 @@ dependencies = [
 [[package]]
 name = "iced_accessibility"
 version = "0.1.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2453,12 +2480,12 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "bitflags 2.13.1",
  "build_helpers",
  "bytes",
- "cosmic-client-toolkit",
+ "cosmic-client-toolkit 0.2.0 (git+https://github.com/pop-os/cosmic-protocols?rev=c0cff4d)",
  "dnd",
  "glam",
  "iced_accessibility",
@@ -2480,7 +2507,7 @@ dependencies = [
 [[package]]
 name = "iced_debug"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "iced_core",
  "iced_futures",
@@ -2490,7 +2517,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "futures",
  "iced_core",
@@ -2504,7 +2531,7 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
@@ -2525,7 +2552,7 @@ dependencies = [
 [[package]]
 name = "iced_program"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "iced_graphics",
  "iced_runtime",
@@ -2534,7 +2561,7 @@ dependencies = [
 [[package]]
 name = "iced_renderer"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "iced_graphics",
  "iced_tiny_skia",
@@ -2546,11 +2573,11 @@ dependencies = [
 [[package]]
 name = "iced_runtime"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "build_helpers",
  "bytes",
- "cosmic-client-toolkit",
+ "cosmic-client-toolkit 0.2.0 (git+https://github.com/pop-os/cosmic-protocols?rev=c0cff4d)",
  "dnd",
  "iced_accessibility",
  "iced_core",
@@ -2563,7 +2590,7 @@ dependencies = [
 [[package]]
 name = "iced_tiny_skia"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -2580,13 +2607,13 @@ dependencies = [
 [[package]]
 name = "iced_wgpu"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "as-raw-xcb-connection",
  "bitflags 2.13.1",
  "build_helpers",
  "bytemuck",
- "cosmic-client-toolkit",
+ "cosmic-client-toolkit 0.2.0 (git+https://github.com/pop-os/cosmic-protocols?rev=c0cff4d)",
  "cryoglyph",
  "futures",
  "glam",
@@ -2612,10 +2639,10 @@ dependencies = [
 [[package]]
 name = "iced_widget"
 version = "0.14.2"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "build_helpers",
- "cosmic-client-toolkit",
+ "cosmic-client-toolkit 0.2.0 (git+https://github.com/pop-os/cosmic-protocols?rev=c0cff4d)",
  "dnd",
  "iced_accessibility",
  "iced_renderer",
@@ -2632,10 +2659,10 @@ dependencies = [
 [[package]]
 name = "iced_winit"
 version = "0.14.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "build_helpers",
- "cosmic-client-toolkit",
+ "cosmic-client-toolkit 0.2.0 (git+https://github.com/pop-os/cosmic-protocols?rev=c0cff4d)",
  "cursor-icon",
  "dnd",
  "iced_accessibility",
@@ -3348,13 +3375,13 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libcosmic"
 version = "1.0.0"
-source = "git+https://github.com/hahnavi/libcosmic.git?rev=7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a#7e52ad38eb40f7a3af583c6ac87a1ef15f0c222a"
+source = "git+https://github.com/hahnavi/libcosmic.git?branch=hahnavi#af396d7b07e764bdf4fee7936533a12929c3d8e1"
 dependencies = [
  "apply",
  "ashpd 0.12.3",
  "auto_enums",
  "build_helpers",
- "cosmic-client-toolkit",
+ "cosmic-client-toolkit 0.2.0 (git+https://github.com/pop-os/cosmic-protocols?rev=32283d7)",
  "cosmic-config",
  "cosmic-freedesktop-icons",
  "cosmic-settings-daemon",
@@ -3382,6 +3409,7 @@ dependencies = [
  "palette",
  "phf",
  "rfd",
+ "roxmltree 0.20.0",
  "rust-embed",
  "serde",
  "slotmap",
@@ -6191,8 +6219,10 @@ name = "viewer-core"
 version = "1.0.0"
 dependencies = [
  "fast_image_resize",
+ "gif 0.14.2",
  "image",
  "kamadak-exif",
+ "libc",
  "libcosmic",
  "libheif-rs",
  "lru",
@@ -7806,7 +7836,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
 dependencies = [
  "log",
- "serde",
 ]
 
 [[package]]
@@ -7834,11 +7863,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d67f66717c2ca4f5fe18894e4724c7d22076dea8f245ea5386a05a4b6b8f4a53"
 dependencies = [
  "bytemuck",
- "image-webp",
  "jpeg-encoder",
  "jxl-oxide",
- "kamadak-exif",
- "serde",
  "zune-bmp",
  "zune-core 0.5.3",
  "zune-farbfeld",
@@ -7847,7 +7873,6 @@ dependencies = [
  "zune-jpegxl",
  "zune-png",
  "zune-ppm",
- "zune-psd",
  "zune-qoi",
 ]
 
@@ -7902,15 +7927,6 @@ name = "zune-ppm"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fa3b8ca5bfe13b58735c3c8e56442390946e8e0e0ff50e12b9215afd278d422"
-dependencies = [
- "zune-core 0.5.3",
-]
-
-[[package]]
-name = "zune-psd"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a518b7a7bee76246a6c783d795c56204cd9184ce0e2e4483717f1b9438c902c"
 dependencies = [
  "zune-core 0.5.3",
 ]

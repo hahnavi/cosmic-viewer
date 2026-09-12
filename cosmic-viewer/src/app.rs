@@ -55,14 +55,15 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use viewer_canvas::{CanvasImage, CanvasMessage, ToolKind, ViewportManager, ZOOM_STEP};
-use viewer_config::{AppTheme, ViewerConfig};
+use viewer_config::{AppTheme, RenderMode, ViewerConfig};
 use viewer_core::{
-    CachedImage, ClipboardImage, ImageCache, NavState, get_image_dir, image_mime_type,
-    is_supported_image, load_image, load_thumbnail, read_dpi, scan_dir,
+    CachedImage, ClipboardImage, GifPlayer, ImageCache, MAX_TEX, NavState, get_image_dir,
+    image_mime_type, is_supported_image, load_image, load_preview, load_thumbnail, read_dpi,
+    scan_dir,
 };
 use viewer_toolbar::{ItemPriority, ToolbarItem, ToolbarMode, responsive_toolbar};
 use viewer_tools::{
@@ -85,6 +86,16 @@ enum PendingAction {
     Quit,
 }
 
+/// Playback state for the animated GIF currently on the canvas: a lazy frame
+/// decoder plus the timing needed to schedule the next frame.
+struct AnimationPlayback {
+    path: PathBuf,
+    player: Arc<Mutex<GifPlayer>>,
+    delay: Duration,
+    generation: u64,
+    pending_first: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextStyle {
     Bold,
@@ -101,11 +112,16 @@ pub struct CosmicViewer {
     key_binds: HashMap<KeyBind, MenuAction>,
     config: ViewerConfig,
     app_themes: Vec<String>,
+    render_modes: Vec<String>,
     nav: NavState,
     nav_bar_model: nav_bar::Model,
     cache: ImageCache,
     scroll_id: Id,
     viewport: ViewportManager,
+    animation: Option<AnimationPlayback>,
+    animation_generation: u64,
+    pending_full: Vec<ViewerMessage>,
+    pending_full_path: Option<PathBuf>,
     context_page: Option<ContextMessage>,
     context_menu_position: Option<Point>,
     annotate_tool: AnnotateTool,
@@ -265,7 +281,7 @@ impl CosmicViewer {
             .filter(|path| is_supported_image(path.as_path()))
             .cloned()
         {
-            tasks.push(self.load_full_image(selected));
+            tasks.push(self.load_preview_image(selected));
         } else if let Some(window_id) = self.core.main_window_id() {
             tasks.push(self.set_window_title(window_title, window_id));
         }
@@ -322,29 +338,128 @@ impl CosmicViewer {
         )
     }
 
-    /// Show the cached image if `path` is selected. Returns whether it was shown.
-    fn show_cached_image(&mut self, path: &Path) -> bool {
+    /// Show the cached entry for `path` if it is still selected.
+    ///
+    /// Keep the preview as-is; if full-resolution pixels are already attached
+    /// after an edit, reattach them without resetting the view.
+    fn show_cached_image(&mut self, path: &Path) {
         if self.nav.current().map(PathBuf::as_path) != Some(path) {
-            return false;
+            return;
         }
 
         let Some(cached) = self.cache.get_full(path) else {
-            return false;
+            return;
         };
 
         if self.viewport.active_tool().is_some() {
             self.viewport.cancel_tool();
         }
 
-        self.viewport.set_image(
-            Some(CanvasImage {
-                handle: cached.handle,
-                width: cached.width,
-                height: cached.height,
-            }),
-            Some(cached.image),
-        );
-        true
+        let already_displayed = self
+            .viewport
+            .image()
+            .is_some_and(|image| image.handle.id() == cached.handle.id());
+
+        if already_displayed {
+            if let Some(full) = cached.image {
+                self.viewport.set_full_image(full);
+            }
+        } else {
+            self.viewport.set_image(
+                Some(CanvasImage {
+                    handle: cached.handle,
+                    width: cached.width,
+                    height: cached.height,
+                }),
+                cached.image,
+            );
+        }
+
+        self.cache.release_full_pixels_except(path);
+    }
+
+    /// Keep GIF playback in sync with the current edit state.
+    ///
+    /// Play only when the canvas shows unedited pixels; enter an edit tool to
+    /// pause on the current frame, then resume after undoing or reverting.
+    fn sync_playback(&mut self) -> Task<Action<ViewerMessage>> {
+        let editable =
+            self.viewport.active_tool().is_none() && self.viewport.operations().is_empty();
+
+        let Some(path) = self.nav.current().cloned() else {
+            self.animation = None;
+            return Task::none();
+        };
+
+        let animation = self
+            .cache
+            .get_full(&path)
+            .and_then(|cached| cached.animation)
+            .filter(|_| editable);
+
+        let Some(animation) = animation else {
+            if let Some(playback) = self.animation.take()
+                && !editable
+                && self.viewport.operations().is_empty()
+                && playback.path == path
+                && let Some(cached) = self.cache.get_full(&path)
+            {
+                self.viewport.set_texture(cached.handle);
+            }
+            return Task::none();
+        };
+
+        if self
+            .animation
+            .as_ref()
+            .is_some_and(|playback| playback.path == path)
+        {
+            return Task::none();
+        }
+
+        let Ok(player) = animation.player() else {
+            self.animation = None;
+            return Task::none();
+        };
+
+        let delay = animation.first_delay();
+        if let Some(cached) = self.cache.get_full(&path) {
+            self.viewport.set_texture(cached.handle);
+        }
+        self.animation_generation = self.animation_generation.wrapping_add(1);
+        self.animation = Some(AnimationPlayback {
+            path,
+            player: Arc::new(Mutex::new(player)),
+            delay,
+            generation: self.animation_generation,
+            pending_first: true,
+        });
+        self.schedule_next_frame()
+    }
+
+    /// Wait for the frame delay and decode the next frame off-thread.
+    fn schedule_next_frame(&mut self) -> Task<Action<ViewerMessage>> {
+        let Some(playback) = self.animation.as_mut() else {
+            return Task::none();
+        };
+
+        let player = Arc::clone(&playback.player);
+        let path = playback.path.clone();
+        let generation = playback.generation;
+        let delay = playback.delay;
+        let skip_first = std::mem::take(&mut playback.pending_first);
+
+        Task::perform(
+            async move {
+                tokio::time::sleep(delay).await;
+                tokio::task::spawn_blocking(move || decode_animation_frame(&player, skip_first))
+                    .await
+                    .map_err(|e| format!("GIF decode task failed: {e}"))
+                    .and_then(std::convert::identity)
+            },
+            move |result| ViewerMessage::AnimationFrame(path, generation, result),
+        )
+        .map(Action::App)
     }
 
     /// Rebuild the working image.
@@ -354,7 +469,7 @@ impl CosmicViewer {
             .nav
             .current()
             .and_then(|path| self.cache.get_full(path))
-            .map(|cached| cached.image);
+            .and_then(|cached| cached.image);
 
         if let Some(original) = original {
             let mut base = original;
@@ -420,28 +535,37 @@ impl CosmicViewer {
                 .unwrap_or_default(),
             fl!("app-name")
         );
-        let window_title = if let Some(window_id) = self.core.main_window_id() {
-            self.set_window_title(window_title.clone(), window_id)
-        } else {
-            Task::none()
-        };
-        if self.cache.get_full(&path).is_some() || self.cache.is_pending(&path) {
+        let window_title = self
+            .core
+            .main_window_id()
+            .map_or_else(Task::none, |window_id| {
+                self.set_window_title(window_title, window_id)
+            });
+        if self
+            .cache
+            .get_full(&path)
+            .is_some_and(|cached| cached.image.is_some())
+            || !self.cache.try_set_pending(&path)
+        {
             return window_title;
         }
 
-        self.cache.set_pending(path.clone());
         let cache = self.cache.clone();
 
         future(async move {
             match load_image(path.clone()).await {
                 Ok(loaded) => {
+                    let handle = cache
+                        .get_full(&loaded.path)
+                        .map_or(loaded.handle, |cached| cached.handle);
                     cache.insert_full(
                         loaded.path.clone(),
                         CachedImage {
-                            handle: loaded.handle,
-                            image: loaded.image,
+                            handle,
+                            image: Some(loaded.image),
                             width: loaded.width,
                             height: loaded.height,
+                            animation: loaded.animation.map(Arc::new),
                         },
                     );
                     Action::App(ViewerMessage::Image(ImageMessage::ImageReady(loaded.path)))
@@ -450,6 +574,34 @@ impl CosmicViewer {
             }
         })
         .chain(window_title)
+    }
+
+    /// Load a display-sized preview for `path` without keeping full pixels.
+    fn load_preview_image(&self, path: PathBuf) -> Task<Action<ViewerMessage>> {
+        if self.cache.get_full(&path).is_some() || !self.cache.try_set_preview_pending(&path) {
+            return Task::none();
+        }
+
+        let cache = self.cache.clone();
+
+        future(async move {
+            match load_preview(path.clone(), MAX_TEX).await {
+                Ok(preview) => {
+                    cache.insert_preview(
+                        path.clone(),
+                        CachedImage {
+                            handle: preview.handle,
+                            image: None,
+                            width: preview.width,
+                            height: preview.height,
+                            animation: preview.animation.map(Arc::new),
+                        },
+                    );
+                    Action::App(ViewerMessage::Image(ImageMessage::PreviewReady(path)))
+                }
+                Err(_) => Action::App(ViewerMessage::Image(ImageMessage::LoadError(path))),
+            }
+        })
     }
 
     fn image_details_page(&self) -> Element<'_, ViewerMessage> {
@@ -1125,7 +1277,7 @@ impl CosmicViewer {
         } else {
             // No baked working image (nothing edited): flatten every op onto the cached original.
             let current = self.nav.current()?;
-            self.cache.get_full(current)?.image
+            self.cache.get_full(current)?.image?
         };
 
         let is_overlay = |op: &dyn ToolOperation| {
@@ -1445,7 +1597,32 @@ impl CosmicViewer {
             widget::settings::item::builder(fl!("show-navbar"))
                 .toggler(self.config.show_navbar, ViewerMessage::ShowNavbar),
         );
-        widget::settings::view_column(vec![appearance.into(), startup.into()]).into()
+
+        let mut sections = vec![appearance.into()];
+
+        let selected = match self.config.render_mode {
+            RenderMode::Automatic => 0,
+            RenderMode::Software => 1,
+        };
+        let rendering = widget::settings::section()
+            .title(fl!("rendering"))
+            .add(
+                widget::settings::item::builder(fl!("render-mode")).control(widget::dropdown(
+                    &self.render_modes,
+                    Some(selected),
+                    |index| {
+                        ViewerMessage::RenderMode(match index {
+                            1 => RenderMode::Software,
+                            _ => RenderMode::Automatic,
+                        })
+                    },
+                )),
+            )
+            .add(widget::text::caption(fl!("render-mode-hint")));
+        sections.push(rendering.into());
+
+        sections.push(startup.into());
+        widget::settings::view_column(sections).into()
     }
 }
 
@@ -1492,11 +1669,16 @@ impl Application for CosmicViewer {
             key_binds: key_binds::init_keybinds(),
             config,
             app_themes,
+            render_modes: vec![fl!("render-mode-automatic"), fl!("render-mode-software")],
             nav: NavState::new(),
             nav_bar_model: nav_bar::Model::default(),
             cache: ImageCache::with_defaults(),
             scroll_id,
             viewport: ViewportManager::default(),
+            animation: None,
+            animation_generation: 0,
+            pending_full: Vec::new(),
+            pending_full_path: None,
             context_page: None,
             context_menu_position: None,
             annotate_tool: AnnotateTool::default(),
@@ -1890,9 +2072,79 @@ impl Application for CosmicViewer {
         }
         None
     }
+    fn update(&mut self, message: Self::Message) -> Task<Action<Self::Message>> {
+        let mut tasks = Vec::with_capacity(2);
+
+        let defer = needs_full_pixels(&message)
+            && self.nav.current().is_some_and(|path| {
+                self.cache
+                    .get_full(path)
+                    .is_none_or(|cached| cached.image.is_none())
+            });
+
+        if defer {
+            if let Some(path) = self.nav.current().cloned() {
+                if self.pending_full_path.as_ref() != Some(&path) {
+                    self.pending_full.clear();
+                    self.pending_full_path = Some(path.clone());
+                }
+                self.pending_full.push(message);
+                if !self.cache.is_pending(&path) {
+                    tasks.push(self.load_full_image(path));
+                }
+            }
+        } else {
+            tasks.push(self.handle_message(message));
+        }
+
+        tasks.push(self.sync_playback());
+        Task::batch(tasks)
+    }
+    fn on_app_exit(&mut self) -> Option<Self::Message> {
+        Some(ViewerMessage::CloseRequested)
+    }
+
+    fn on_close_requested(&self, id: window::Id) -> Option<Self::Message> {
+        (self.core().main_window_id() == Some(id)).then_some(ViewerMessage::Quit)
+    }
+
+    fn subscription(&self) -> Subscription<Self::Message> {
+        let watcher_sub =
+            crate::watcher::watch_directory(self.nav.dir().map(std::path::Path::to_path_buf))
+                .map(ViewerMessage::WatcherEvent);
+
+        let zoom_sub = if self.viewport.is_animating() {
+            window::frames().map(|(_id, at)| ViewerMessage::Animate(at))
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch([
+            event::listen_with(|event, _status, _id| match event {
+                iced::Event::Window(iced::window::Event::Resized(size)) => {
+                    Some(ViewerMessage::WindowResized(size))
+                }
+                iced::Event::Window(iced::window::Event::CloseRequested) => {
+                    Some(ViewerMessage::CloseRequested)
+                }
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key,
+                    modifiers,
+                    text,
+                    ..
+                }) => Some(ViewerMessage::KeyPressed(key, modifiers, text)),
+                _ => None,
+            }),
+            watcher_sub,
+            zoom_sub,
+        ])
+    }
+}
+
+impl CosmicViewer {
     // reason: central message dispatch; one match arm per variant, kept colocated.
     #[allow(clippy::too_many_lines)]
-    fn update(&mut self, message: Self::Message) -> Task<Action<Self::Message>> {
+    fn handle_message(&mut self, message: ViewerMessage) -> Task<Action<ViewerMessage>> {
         // Helper for updating config values efficiently
         macro_rules! config_set {
             ($name: ident, $value: expr) => {
@@ -1926,6 +2178,11 @@ impl Application for CosmicViewer {
                 let theme = self.config.app_theme.theme();
 
                 return cosmic::command::set_theme(theme);
+            }
+            ViewerMessage::RenderMode(render_mode) => {
+                config_set!(render_mode, render_mode);
+                let toast = toaster::Toast::new(fl!("render-mode-toast"));
+                tasks.push(self.toasts.push(toast).map(Action::App));
             }
             ViewerMessage::Copy => {
                 self.context_menu_position = None;
@@ -2060,7 +2317,16 @@ impl Application for CosmicViewer {
                 }
             }
             ViewerMessage::Save => {
-                if let (Some(image), Some(path)) = (self.flatten_image(), self.nav.current()) {
+                let unedited_animation = !self.has_unsaved_edits()
+                    && self
+                        .nav
+                        .current()
+                        .and_then(|path| self.cache.get_full(path))
+                        .is_some_and(|cached| cached.animation.is_some());
+
+                if !unedited_animation
+                    && let (Some(image), Some(path)) = (self.flatten_image(), self.nav.current())
+                {
                     if let Err(e) = image.save(path) {
                         tracing::error!("Failed to save image: {e}");
                     } else {
@@ -2068,7 +2334,7 @@ impl Application for CosmicViewer {
                         self.cache.remove_full(path);
                         self.viewport.cancel_tool();
                         self.text_editing = false;
-                        tasks.push(self.load_full_image(path.clone()));
+                        tasks.push(self.load_preview_image(path.clone()));
                     }
                 }
             }
@@ -2111,7 +2377,23 @@ impl Application for CosmicViewer {
                 });
             }
             ViewerMessage::SavedAs(path) => {
-                if let Some(image) = self.flatten_image()
+                let current = self.nav.current().cloned();
+                let unedited_animation = !self.has_unsaved_edits()
+                    && current
+                        .as_ref()
+                        .and_then(|source| self.cache.get_full(source))
+                        .is_some_and(|cached| cached.animation.is_some());
+
+                if let Some(source) = current
+                    && unedited_animation
+                    && same_extension(&source, &path)
+                {
+                    if source != path
+                        && let Err(e) = std::fs::copy(&source, &path)
+                    {
+                        tracing::error!("Failed to save image: {e}");
+                    }
+                } else if let Some(image) = self.flatten_image()
                     && let Err(e) = image.save(&path)
                 {
                     tracing::error!("Failed to save image: {e}");
@@ -2699,6 +2981,26 @@ impl Application for CosmicViewer {
             ViewerMessage::Animate(now) => {
                 self.viewport.tick(now);
             }
+            ViewerMessage::AnimationFrame(path, generation, result) => {
+                let current = self.animation.as_ref().is_some_and(|playback| {
+                    playback.path == path && playback.generation == generation
+                });
+                if current {
+                    match result {
+                        Ok((handle, delay)) => {
+                            if let Some(playback) = self.animation.as_mut() {
+                                playback.delay = delay;
+                            }
+                            self.viewport.set_texture(handle);
+                            tasks.push(self.schedule_next_frame());
+                        }
+                        Err(e) => {
+                            tracing::warn!("GIF playback stopped: {e}");
+                            self.animation = None;
+                        }
+                    }
+                }
+            }
             ViewerMessage::Nav(msg) => match msg {
                 NavMessage::ScanComplete(dir, images, select) => {
                     self.viewport.cancel_tool();
@@ -2716,10 +3018,12 @@ impl Application for CosmicViewer {
                     }
 
                     // Show the selected image, using the cache when available.
-                    if let Some(path) = self.nav.current().cloned()
-                        && !self.show_cached_image(&path)
-                    {
-                        tasks.push(self.load_full_image(path));
+                    if let Some(path) = self.nav.current().cloned() {
+                        if self.cache.get_full(&path).is_some() {
+                            self.show_cached_image(&path);
+                        } else {
+                            tasks.push(self.load_preview_image(path));
+                        }
                     }
 
                     if let Some(idx) = self.nav.index() {
@@ -2781,25 +3085,18 @@ impl Application for CosmicViewer {
                                 .update::<ViewerMessage>(ColorPickerUpdate::ToggleColorPicker);
                         }
 
-                        if let Some(cached) = self.cache.get_full(&path) {
+                        if self.cache.get_full(&path).is_some() {
                             self.viewport.revert_all();
-                            self.viewport.set_image(
-                                Some(CanvasImage {
-                                    handle: cached.handle,
-                                    width: cached.width,
-                                    height: cached.height,
-                                }),
-                                Some(cached.image),
-                            );
+                            self.show_cached_image(&path);
+                        } else {
+                            tasks.push(self.load_preview_image(path.clone()));
                         }
                         // Don't clear the viewport - keep the previous image
-                        // visible until the new one loads
+                        // visible until the preview loads.
 
-                        tasks.push(self.load_full_image(path));
-
-                        // Prefetch only the immediate neighbors, then evict images
-                        // further out. Iterating by index avoids cloning the whole
-                        // file list on every navigation.
+                        // Prefetch only the immediate neighbors, then evict
+                        // entries further out. Iterating by index avoids
+                        // cloning the whole file list on every navigation.
                         let total = self.nav.total();
                         let mut adjacent = Vec::with_capacity(2);
                         if idx > 0 {
@@ -2810,9 +3107,9 @@ impl Application for CosmicViewer {
                         }
                         for adj_path in adjacent {
                             if self.cache.get_full(&adj_path).is_none()
-                                && !self.cache.is_pending(&adj_path)
+                                && !self.cache.is_preview_pending(&adj_path)
                             {
-                                tasks.push(self.load_full_image(adj_path));
+                                tasks.push(self.load_preview_image(adj_path));
                             }
                         }
 
@@ -2864,7 +3161,7 @@ impl Application for CosmicViewer {
                         if let Some(path) = self.nav.current().cloned()
                             && self.cache.get_full(&path).is_none()
                         {
-                            tasks.push(self.load_full_image(path));
+                            tasks.push(self.load_preview_image(path));
                         }
                     }
                 }
@@ -2872,6 +3169,10 @@ impl Application for CosmicViewer {
             ViewerMessage::Image(msg) => match msg {
                 ImageMessage::ThumbnailReady => {
                     // Trigger a redraw for the updated thumbnail.
+                }
+                ImageMessage::PreviewReady(path) => {
+                    // A display-sized image arrived; show it if still selected.
+                    self.show_cached_image(&path);
                 }
                 ImageMessage::ImageReady(path) => {
                     if let Some(idx) = self.nav.index() {
@@ -2881,10 +3182,22 @@ impl Application for CosmicViewer {
                             tasks.push(self.load_nearby_thumbnails(idx, 5));
                         }
                     }
+
+                    // Replay edits that were waiting for full-resolution pixels.
+                    if self.pending_full_path.as_deref() == Some(path.as_path())
+                        && self.nav.current().map(PathBuf::as_path) == Some(path.as_path())
+                    {
+                        self.pending_full_path = None;
+                        let queued = std::mem::take(&mut self.pending_full);
+                        for queued_message in queued {
+                            tasks.push(self.update(queued_message));
+                        }
+                    }
                 }
                 ImageMessage::LoadError(path) => {
                     self.cache.clear_pending(&path);
                     self.cache.clear_pending_thumbnail(&path);
+                    self.cache.clear_pending_preview(&path);
                 }
             },
             ViewerMessage::Context(page) => {
@@ -3282,7 +3595,7 @@ impl Application for CosmicViewer {
                                     width: cached.width,
                                     height: cached.height,
                                 }),
-                                Some(cached.image),
+                                cached.image.clone(),
                             );
                         }
                     }
@@ -3476,7 +3789,7 @@ impl Application for CosmicViewer {
                         if let Some(current) = self.nav.current() {
                             self.viewport.revert_all();
                             self.cache.remove_full(current);
-                            tasks.push(self.load_full_image(current.clone()));
+                            tasks.push(self.load_preview_image(current.clone()));
                         }
                     }
                     EditMessage::CropRatioPopupToggle => {
@@ -3880,11 +4193,25 @@ impl Application for CosmicViewer {
                             }
                         }
                     }
-                    EditMessage::RevertAll => self.viewport.revert_all(),
+                    EditMessage::RevertAll => {
+                        self.viewport.revert_all();
+                        if let Some(path) = self.nav.current().cloned()
+                            && let Some(cached) = self.cache.get_full(&path)
+                        {
+                            self.viewport.set_image(
+                                Some(CanvasImage {
+                                    handle: cached.handle,
+                                    width: cached.width,
+                                    height: cached.height,
+                                }),
+                                cached.image,
+                            );
+                        }
+                    }
                 }
             }
             ViewerMessage::Surface(action) => {
-                return cosmic::task::message(Action::Cosmic(cosmic::app::Action::Surface(action)));
+                return cosmic::task::message(Action::Surface(action));
             }
             ViewerMessage::ShowNavbar(show_navbar) => {
                 config_set!(show_navbar, show_navbar);
@@ -3907,46 +4234,6 @@ impl Application for CosmicViewer {
             Task::batch(tasks)
         }
     }
-
-    fn on_app_exit(&mut self) -> Option<Self::Message> {
-        Some(ViewerMessage::CloseRequested)
-    }
-
-    fn on_close_requested(&self, id: window::Id) -> Option<Self::Message> {
-        (self.core().main_window_id() == Some(id)).then_some(ViewerMessage::Quit)
-    }
-
-    fn subscription(&self) -> Subscription<Self::Message> {
-        let watcher_sub =
-            crate::watcher::watch_directory(self.nav.dir().map(std::path::Path::to_path_buf))
-                .map(ViewerMessage::WatcherEvent);
-
-        let animation_sub = if self.viewport.is_animating() {
-            window::frames().map(|(_id, at)| ViewerMessage::Animate(at))
-        } else {
-            Subscription::none()
-        };
-
-        Subscription::batch([
-            event::listen_with(|event, _status, _id| match event {
-                iced::Event::Window(iced::window::Event::Resized(size)) => {
-                    Some(ViewerMessage::WindowResized(size))
-                }
-                iced::Event::Window(iced::window::Event::CloseRequested) => {
-                    Some(ViewerMessage::CloseRequested)
-                }
-                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                    key,
-                    modifiers,
-                    text,
-                    ..
-                }) => Some(ViewerMessage::KeyPressed(key, modifiers, text)),
-                _ => None,
-            }),
-            watcher_sub,
-            animation_sub,
-        ])
-    }
 }
 
 // HELPER FUNCTIONS
@@ -3957,6 +4244,49 @@ fn detail_row<'a>(label: String, value: String) -> Element<'a, ViewerMessage> {
         .push(text::body(value))
         .spacing(2)
         .into()
+}
+
+/// Whether both paths carry the same extension, ignoring case.
+fn same_extension(a: &Path, b: &Path) -> bool {
+    a.extension()
+        .zip(b.extension())
+        .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// Messages that read or modify full-resolution pixels. They are held until
+/// the active image's full pixels are decoded.
+const fn needs_full_pixels(message: &ViewerMessage) -> bool {
+    matches!(
+        message,
+        ViewerMessage::Edit(_)
+            | ViewerMessage::Save
+            | ViewerMessage::SaveAs
+            | ViewerMessage::SavedAs(_)
+            | ViewerMessage::CopyToClipboard
+    )
+}
+
+/// Decode the next GIF frame on a worker thread. Skip the initial static frame
+/// when playback starts.
+fn decode_animation_frame(
+    player: &Arc<Mutex<GifPlayer>>,
+    skip_first: bool,
+) -> Result<(Handle, Duration), String> {
+    let frame = {
+        let mut player = player
+            .lock()
+            .map_err(|_| "GIF player lock poisoned".to_string())?;
+        if skip_first {
+            player.next_frame().map_err(|e| e.to_string())?;
+        }
+        player
+            .next_frame_looping()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GIF has no frames".to_string())?
+    };
+
+    let image = DynamicImage::ImageRgba8(frame.image);
+    Ok((viewer_core::display_handle_owned(image), frame.delay))
 }
 
 fn friendly_type_name(ext: &str) -> String {

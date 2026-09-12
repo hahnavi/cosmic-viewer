@@ -13,9 +13,11 @@ license.workspace = true
 [dependencies]
 libcosmic.workspace = true
 fast_image_resize.workspace = true
+gif.workspace = true
 image.workspace = true
 kamadak-exif.workspace = true
 libheif-rs.workspace = true
+libc.workspace = true
 lru.workspace = true
 rayon.workspace = true
 resvg.workspace = true

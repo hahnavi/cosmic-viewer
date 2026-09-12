@@ -8,13 +8,13 @@ use cosmic::{
         time::Instant,
         widget::scrollable::Viewport,
     },
-    widget::{ToastId, color_picker::ColorPickerUpdate, segmented_button},
+    widget::{ToastId, color_picker::ColorPickerUpdate, image::Handle, segmented_button},
 };
 use smol_str::SmolStr;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use trash::TrashItem;
 use viewer_canvas::CanvasMessage;
-use viewer_config::AppTheme;
+use viewer_config::{AppTheme, RenderMode};
 use viewer_tools::{
     annotate::{AnnotateColor, AnnotateTool},
     crop::CropRatio,
@@ -45,6 +45,7 @@ pub enum UnsavedChoice {
 #[derive(Debug, Clone)]
 pub enum ViewerMessage {
     AppTheme(AppTheme),
+    RenderMode(RenderMode),
     Copy,
     CopyToClipboard,
     CopyFilePath,
@@ -77,12 +78,13 @@ pub enum ViewerMessage {
     Nav(NavMessage),
     WindowResized(Size),
     Animate(Instant),
+    AnimationFrame(PathBuf, u64, Result<(Handle, Duration), String>),
     KeyPressed(Key, Modifiers, Option<SmolStr>),
     Image(ImageMessage),
     Context(ContextMessage),
     Canvas(CanvasMessage),
     Edit(EditMessage),
-    Surface(cosmic::surface::Action),
+    Surface(cosmic::surface::Action<Self>),
     WatcherEvent(crate::watcher::WatcherEvent),
     WatcherRescan,
     TextPaste(String),
@@ -103,6 +105,7 @@ pub enum NavMessage {
 pub enum ImageMessage {
     /// Redraw the visible nav entries after a thumbnail is cached.
     ThumbnailReady,
+    PreviewReady(PathBuf),
     ImageReady(PathBuf),
     LoadError(PathBuf),
 }

@@ -18,9 +18,29 @@ use turbojpeg::{Decompressor, Image, PixelFormat, ScalingFactor};
 use zune_image::codecs::bmp::zune_core::colorspace::ColorSpace;
 use zune_image::image::Image as ZuneImage;
 
+use crate::animation::{Animation, GifPlayer, animation_from_parts};
+
 // Cap texture uploads at 2048px on the long edge; the full-resolution image
 // is kept separately so edits and saves operate on the real pixels, not the texture.
-const MAX_TEX: u32 = 2048;
+pub const MAX_TEX: u32 = 2048;
+
+/// Whether the path carries a GIF extension, case-insensitively.
+fn is_gif(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"))
+}
+
+/// Ask the allocator to return free heap pages to the OS.
+///
+/// Trim memory held by glibc after decoding large images.
+pub fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `malloc_trim` is thread-safe and only releases free arenas.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
 
 /// Limit concurrent full-resolution thumbnail decodes to reduce memory use.
 static THUMBNAIL_DECODE_LIMIT: LazyLock<Semaphore> = LazyLock::new(|| {
@@ -49,6 +69,7 @@ pub struct LoadedImage {
     pub width: u32,
     pub height: u32,
     pub path: PathBuf,
+    pub animation: Option<Animation>,
 }
 
 impl Debug for LoadedImage {
@@ -58,8 +79,18 @@ impl Debug for LoadedImage {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("path", &self.path)
+            .field("animation", &self.animation)
             .finish_non_exhaustive()
     }
+}
+
+/// A display-sized image: pixels large enough to fill the window, with the
+/// full-resolution data left on disk until an edit needs it.
+pub struct PreviewImage {
+    pub handle: Handle,
+    pub width: u32,
+    pub height: u32,
+    pub animation: Option<Animation>,
 }
 
 /// Display texture, downscaled to `MAX_TEX`. The source image is left full-res.
@@ -76,6 +107,25 @@ pub fn display_handle(image: &DynamicImage) -> Handle {
     Handle::from_rgba(width, height, rgba.into_raw())
 }
 
+/// Like [`display_handle`], but takes ownership of the image so an RGBA image
+/// at texture size can hand its pixel buffer to the texture without copying.
+#[must_use]
+pub fn display_handle_owned(image: DynamicImage) -> Handle {
+    let (width, height) = (image.width(), image.height());
+    if (width > MAX_TEX || height > MAX_TEX)
+        && let Ok((tw, th, pixels)) = fast_resize(&image, MAX_TEX)
+    {
+        return Handle::from_rgba(tw, th, pixels);
+    }
+    match image {
+        DynamicImage::ImageRgba8(rgba) => Handle::from_rgba(width, height, rgba.into_raw()),
+        other => {
+            let rgba = other.to_rgba8();
+            Handle::from_rgba(width, height, rgba.into_raw())
+        }
+    }
+}
+
 /// Decode the image at `path` on a background thread.
 ///
 /// # Errors
@@ -87,6 +137,7 @@ pub async fn load_image(path: PathBuf) -> Result<LoadedImage, LoadError> {
 
     rayon::spawn(move || {
         let result = load_image_sync(&path);
+        release_free_memory();
         let _ = tx.send(result);
     });
 
@@ -105,6 +156,12 @@ fn load_image_sync(path: &Path) -> Result<LoadedImage, LoadError> {
     }
     if matches!(extension.as_str(), "heif" | "heic") {
         return load_heif(path);
+    }
+
+    if extension == "gif"
+        && let Ok(img) = load_gif(path)
+    {
+        return Ok(img);
     }
 
     // Use turbojpeg for JPEGs (faster than zune/image crate)
@@ -214,6 +271,38 @@ fn load_with_image(path: &Path) -> Result<LoadedImage, LoadError> {
     Ok(finish_loaded(image::open(path)?, path))
 }
 
+/// Decode the first GIF frame and keep the path for lazy playback.
+fn load_gif(path: &Path) -> Result<LoadedImage, LoadError> {
+    let mut player = GifPlayer::open(path)?;
+
+    let Some(first) = player.next_frame()? else {
+        return Err(LoadError::UnsupportedFormat("GIF: no frames".into()));
+    };
+    let first_delay = first.delay;
+    let first_image = DynamicImage::ImageRgba8(first.image);
+
+    let animated = player.next_frame()?.is_some();
+
+    let (width, height) = (first_image.width(), first_image.height());
+    let handle = display_handle(&first_image);
+    Ok(LoadedImage {
+        handle,
+        image: Arc::new(first_image),
+        width,
+        height,
+        path: path.to_path_buf(),
+        animation: animated.then(|| animation_from_parts(path.to_path_buf(), first_delay)),
+    })
+}
+
+/// Read GIF animation metadata for a preview.
+fn load_animation_source(path: &Path) -> Option<Animation> {
+    let mut player = GifPlayer::open(path).ok()?;
+    let first = player.next_frame().ok()??;
+    let animated = player.next_frame().ok()?.is_some();
+    animated.then(|| animation_from_parts(path.to_path_buf(), first.delay))
+}
+
 /// Decode the image at `path` and downscale it to fit `max_size` on its longest
 /// edge, on a background thread.
 ///
@@ -222,6 +311,47 @@ fn load_with_image(path: &Path) -> Result<LoadedImage, LoadError> {
 /// Returns [`LoadError`] if the file cannot be read, the format is unsupported
 /// or fails to decode, or the decode task is cancelled before completion.
 pub async fn load_thumbnail(path: PathBuf, max_size: u32) -> Result<LoadedImage, LoadError> {
+    load_thumbnail_with_options(path, max_size, true).await
+}
+
+/// Decode a display-sized image without retaining full-resolution pixels.
+///
+/// Full-resolution data is decoded only when needed for editing. Animated GIFs
+/// retain a lazy frame source for playback.
+///
+/// # Errors
+///
+/// Returns [`LoadError`] if the file cannot be read, the format is unsupported
+/// or fails to decode, or the decode task is cancelled before completion.
+pub async fn load_preview(path: PathBuf, max_size: u32) -> Result<PreviewImage, LoadError> {
+    let loaded = load_thumbnail_with_options(path.clone(), max_size, false).await?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let source_path = path.clone();
+    rayon::spawn(move || {
+        let dims = image::image_dimensions(&source_path).ok();
+        let animation = is_gif(&source_path)
+            .then(|| load_animation_source(&source_path))
+            .flatten();
+        release_free_memory();
+        let _ = tx.send((dims, animation));
+    });
+    let (dims, animation) = rx.await.map_err(|_| LoadError::Cancelled)?;
+    let (width, height) = dims.unwrap_or((loaded.width, loaded.height));
+
+    Ok(PreviewImage {
+        handle: loaded.handle,
+        width,
+        height,
+        animation,
+    })
+}
+
+async fn load_thumbnail_with_options(
+    path: PathBuf,
+    max_size: u32,
+    allow_exif: bool,
+) -> Result<LoadedImage, LoadError> {
     let _permit = THUMBNAIL_DECODE_LIMIT
         .acquire()
         .await
@@ -230,14 +360,19 @@ pub async fn load_thumbnail(path: PathBuf, max_size: u32) -> Result<LoadedImage,
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     rayon::spawn(move || {
-        let result = load_thumbnail_sync(&path, max_size);
+        let result = load_thumbnail_sync(&path, max_size, allow_exif);
+        release_free_memory();
         let _ = tx.send(result);
     });
 
     rx.await.map_err(|_| LoadError::Cancelled)?
 }
 
-fn load_thumbnail_sync(path: &Path, max_size: u32) -> Result<LoadedImage, LoadError> {
+fn load_thumbnail_sync(
+    path: &Path,
+    max_size: u32,
+    allow_exif: bool,
+) -> Result<LoadedImage, LoadError> {
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -255,13 +390,14 @@ fn load_thumbnail_sync(path: &Path, max_size: u32) -> Result<LoadedImage, LoadEr
         return resized_thumbnail(&loaded.image, max_size, path);
     }
 
-    // 1. For JPEGs, try EXIF thumbnail extraction (no full decode)
+    // 1. For JPEGs, try EXIF thumbnail extraction (no full decode). Previews
+    // skip it: an embedded thumbnail is often tiny and would look soft.
     if matches!(extension.as_str(), "jpg" | "jpeg") {
-        if let Ok(image) = extract_exif_thumbnail(path) {
+        if allow_exif && let Ok(image) = extract_exif_thumbnail(path) {
             return finish_loaded_thumbnail(image, max_size, path);
         }
 
-        // 2. For JPEGs without EXIF, use turbojpeg with DCT scaling (4-8x faster)
+        // 2. Use turbojpeg with DCT scaling (4-8x faster)
         if let Ok(image) = decode_jpeg_scaled(path, max_size) {
             return finish_loaded_thumbnail(image, max_size, path);
         }
@@ -308,6 +444,7 @@ fn resized_thumbnail(
         width,
         height,
         path: path.to_path_buf(),
+        animation: None,
     })
 }
 
@@ -321,6 +458,7 @@ fn finish_loaded(image: DynamicImage, path: &Path) -> LoadedImage {
         width,
         height,
         path: path.to_path_buf(),
+        animation: None,
     }
 }
 
@@ -546,8 +684,8 @@ fn calculate_jpeg_scale(width: u32, height: u32, target: u32) -> ScalingFactor {
         }
     }
 
-    // If even 1/8 is too large, use 1/8 and resize after
-    ScalingFactor::ONE_EIGHTH
+    // Keep smaller sources at full resolution.
+    ScalingFactor::ONE
 }
 
 /// Decode an image to RGBA using zune, without resizing.
@@ -749,5 +887,42 @@ pub fn read_dpi(path: &Path) -> Option<u32> {
             Some(v[0].to_f64().round().clamp(0.0, f64::from(u32::MAX)) as u32)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calculate_jpeg_scale;
+    use turbojpeg::ScalingFactor;
+
+    #[test]
+    fn jpeg_scale_keeps_sources_below_target_at_full_resolution() {
+        // Decoding these at 1/8 (as the fallthrough used to) produced 64x48 and
+        // smaller textures for images that fit the texture cap outright.
+        assert_eq!(calculate_jpeg_scale(512, 384, 2048), ScalingFactor::ONE);
+        assert_eq!(calculate_jpeg_scale(1600, 1067, 2048), ScalingFactor::ONE);
+        assert_eq!(calculate_jpeg_scale(1, 1, 2048), ScalingFactor::ONE);
+        assert_eq!(calculate_jpeg_scale(96, 64, 128), ScalingFactor::ONE);
+    }
+
+    #[test]
+    fn jpeg_scale_picks_the_smallest_scale_at_or_above_target() {
+        // 1/2 of 6000 is 3000 >= 2048; 1/4 would be below the target.
+        assert_eq!(
+            calculate_jpeg_scale(6000, 4000, 2048),
+            ScalingFactor::ONE_HALF
+        );
+        // 1/8 of 16000 is 2000 < 2048, so 1/4 is the smallest usable scale.
+        assert_eq!(
+            calculate_jpeg_scale(16000, 9000, 2048),
+            ScalingFactor::ONE_QUARTER
+        );
+        // Full resolution only when no reduced scale reaches the target.
+        assert_eq!(calculate_jpeg_scale(4000, 3000, 2048), ScalingFactor::ONE);
+        // Exactly on the boundary.
+        assert_eq!(
+            calculate_jpeg_scale(4096, 3072, 2048),
+            ScalingFactor::ONE_HALF
+        );
     }
 }

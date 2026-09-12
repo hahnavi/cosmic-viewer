@@ -13,6 +13,9 @@ COSMIC design language with light and dark theming.
 - **Browse and view** an image or a whole folder with a thumbnail sidebar
 - **Navigation** sorted by name, date, or size, with an adjustable thumbnail size
 - **Viewing** with zoom, pan, fit-to-window, actual size, and fullscreen
+- **Animated GIF playback**, paused automatically while editing
+- **Optional software renderer** for low-memory systems, switchable in
+  Settings → Rendering (takes effect after a restart)
 - **EXIF-aware image details**
 - **Non-destructive editing**: crop, rotate, undo/redo, and revert all
 - **Annotation**: freehand pen, highlighter, shapes (rectangle, ellipse, arrow,

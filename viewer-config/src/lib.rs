@@ -128,6 +128,15 @@ impl AppTheme {
         }
     }
 }
+
+/// Which renderer the app asks iced to use at startup.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum RenderMode {
+    /// GPU rendering via wgpu, with the software renderer as a fallback.
+    #[default]
+    Automatic,
+    Software,
+}
 // reason: each bool is an independent persisted user toggle, not state that
 // forms a machine; collapsing them into enums would distort the config schema.
 #[allow(clippy::struct_excessive_bools)]
@@ -147,6 +156,7 @@ pub struct ViewerConfig {
     pub sort_order: SortOrder,
     pub last_color: Option<[f32; 4]>,
     pub app_theme: AppTheme,
+    pub render_mode: RenderMode,
     pub show_navbar: bool,
 }
 
@@ -166,6 +176,7 @@ impl Default for ViewerConfig {
             sort_order: SortOrder::default(),
             last_color: None,
             app_theme: AppTheme::System,
+            render_mode: RenderMode::default(),
             show_navbar: false,
         }
     }
