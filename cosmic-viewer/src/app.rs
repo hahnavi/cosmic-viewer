@@ -61,8 +61,8 @@ use std::{
 use viewer_canvas::{CanvasImage, CanvasMessage, ToolKind, ViewportManager};
 use viewer_config::{AppTheme, ViewerConfig};
 use viewer_core::{
-    CachedImage, ClipboardImage, ImageCache, NavState, get_image_dir, image_mime_type, load_image,
-    load_thumbnail, read_dpi, scan_dir,
+    CachedImage, ClipboardImage, ImageCache, NavState, get_image_dir, image_mime_type,
+    is_supported_image, load_image, load_thumbnail, read_dpi, scan_dir,
 };
 use viewer_toolbar::{ItemPriority, ToolbarItem, ToolbarMode, responsive_toolbar};
 use viewer_tools::{
@@ -104,7 +104,6 @@ pub struct CosmicViewer {
     nav: NavState,
     nav_bar_model: nav_bar::Model,
     cache: ImageCache,
-    nav_handles: Vec<Option<Handle>>,
     scroll_id: Id,
     viewport: ViewportManager,
     context_page: Option<ContextMessage>,
@@ -248,47 +247,104 @@ impl CosmicViewer {
         let sort_order = self.config.sort_order;
         let dir_clone = dir.clone();
 
-        let title = match select.as_ref() {
-            Some(tab) => tab
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            None => "No Open File".to_string(),
-        };
+        let title = select.as_ref().map_or_else(
+            || "No Open File".to_string(),
+            |tab| {
+                tab.file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            },
+        );
 
         let window_title = format!("{title} - {}", fl!("app-name"));
-        Task::batch([
-            if let Some(window_id) = self.core.main_window_id() {
-                self.set_window_title(window_title, window_id)
-            } else {
-                Task::none()
-            },
-            future(async move {
-                let images = scan_dir(&dir, include_hidden, sort_mode, sort_order).await;
-                Action::App(ViewerMessage::Nav(NavMessage::ScanComplete(
-                    dir_clone, images, select,
-                )))
-            }),
-        ])
+
+        let mut tasks = Vec::with_capacity(2);
+
+        if let Some(selected) = select
+            .as_ref()
+            .filter(|path| is_supported_image(path.as_path()))
+            .cloned()
+        {
+            tasks.push(self.load_full_image(selected));
+        } else if let Some(window_id) = self.core.main_window_id() {
+            tasks.push(self.set_window_title(window_title, window_id));
+        }
+
+        tasks.push(future(async move {
+            let images = scan_dir(&dir, include_hidden, sort_mode, sort_order).await;
+            Action::App(ViewerMessage::Nav(NavMessage::ScanComplete(
+                dir_clone, images, select,
+            )))
+        }));
+
+        Task::batch(tasks)
     }
 
+    /// Thumbnail size plus row spacing.
+    // reason: thumbnail size is a small pixel count; exact as f32.
+    #[allow(clippy::cast_precision_loss)]
+    fn nav_cell_pitch(&self) -> f32 {
+        let spacing = f32::from(theme::active().cosmic().spacing.space_s);
+        self.config.thumbnail_size.pixels() as f32 + spacing
+    }
+
+    /// Scroll offset which places nav entry `idx` at the top of the viewport.
     // reason: thumbnail size and grid index are small in-range counts; exact as f32.
     #[allow(clippy::cast_precision_loss)]
     fn grid_scroll_offset(&self, idx: usize) -> f32 {
-        let thumb_size = self.config.thumbnail_size.pixels() as f32;
-        let button_padding = 8.0;
-        let cell_size = thumb_size + (button_padding * 2.0);
-        let row_spacing = 8.0;
-        idx as f32 * (cell_size + row_spacing)
+        let inset = f32::from(theme::active().cosmic().spacing.space_xxs);
+        (idx as f32).mul_add(self.nav_cell_pitch(), inset)
     }
 
-    fn rebuild_nav_handles(&mut self) {
-        self.nav_handles = self
-            .nav
-            .images()
-            .iter()
-            .map(|path| self.cache.get_thumbnail(path))
-            .collect();
+    /// Visible nav entries plus overscan for the current scroll position.
+    /// Spacers preserve the full scrollbar range while keeping widget work bounded.
+    fn visible_nav_range(&self, total: usize) -> (usize, usize) {
+        const OVERSCAN: usize = 8;
+        const INITIAL_RADIUS: usize = 24;
+
+        if total == 0 {
+            return (0, 0);
+        }
+
+        self.cur_scroll.as_ref().map_or_else(
+            || nav_initial_window(self.nav.index().unwrap_or(0), total, INITIAL_RADIUS),
+            |viewport| {
+                nav_window(
+                    viewport.absolute_offset().y,
+                    viewport.bounds().height,
+                    f32::from(theme::active().cosmic().spacing.space_xxs),
+                    self.nav_cell_pitch(),
+                    total,
+                    self.nav.index(),
+                    OVERSCAN,
+                )
+            },
+        )
+    }
+
+    /// Show the cached image if `path` is selected. Returns whether it was shown.
+    fn show_cached_image(&mut self, path: &Path) -> bool {
+        if self.nav.current().map(PathBuf::as_path) != Some(path) {
+            return false;
+        }
+
+        let Some(cached) = self.cache.get_full(path) else {
+            return false;
+        };
+
+        if self.viewport.active_tool().is_some() {
+            self.viewport.cancel_tool();
+        }
+
+        self.viewport.set_image(
+            Some(CanvasImage {
+                handle: cached.handle,
+                width: cached.width,
+                height: cached.height,
+            }),
+            Some(cached.image),
+        );
+        true
     }
 
     /// Rebuild the working image.
@@ -341,11 +397,7 @@ impl CosmicViewer {
                     match load_thumbnail(path.clone(), max_size).await {
                         Ok(loaded) => {
                             cache.insert_thumbnail(loaded.path.clone(), loaded.handle);
-                            Action::App(ViewerMessage::Image(ImageMessage::ThumbnailReady(
-                                loaded.path,
-                                loaded.width,
-                                loaded.height,
-                            )))
+                            Action::App(ViewerMessage::Image(ImageMessage::ThumbnailReady))
                         }
                         Err(_) => Action::App(ViewerMessage::Image(ImageMessage::LoadError(path))),
                     }
@@ -1451,7 +1503,7 @@ impl Application for CosmicViewer {
             .last_color
             .map(|c| Color::from_rgba(c[0], c[1], c[2], c[3]));
         let app_themes = vec![fl!("match-desktop"), fl!("dark"), fl!("light")];
-        core.nav_bar_set_toggled(config.show_navbar && flags.as_ref().is_none_or(|p| p.is_dir()));
+        core.nav_bar_set_toggled(config.show_navbar);
         let mut viewer = Self {
             core,
             cur_scroll: None,
@@ -1461,7 +1513,6 @@ impl Application for CosmicViewer {
             nav: NavState::new(),
             nav_bar_model: nav_bar::Model::default(),
             cache: ImageCache::with_defaults(),
-            nav_handles: Vec::new(),
             scroll_id,
             viewport: ViewportManager::default(),
             context_page: None,
@@ -1607,17 +1658,20 @@ impl Application for CosmicViewer {
         let panel_width = space_xxs.mul_add(2.0, thumbnail_size as f32) + 36.0;
 
         let active = self.nav.index().unwrap_or(0);
+        let total = self.nav.total();
+        let pitch = self.nav_cell_pitch();
 
-        let items = self
-            .nav
-            .images()
-            .iter()
-            .enumerate()
-            .map(|(img, p)| {
+        // Render nearby entries; spacers preserve the full scroll range.
+        let (first, last) = self.visible_nav_range(total);
+        let mut items: Vec<Element<'_, Action<ViewerMessage>>> = Vec::new();
+        if total > 0 {
+            for img in first..=last {
+                let Some(p) = self.nav.images().get(img) else {
+                    continue;
+                };
                 let handle = self
-                    .nav_handles
-                    .get(img)
-                    .and_then(std::clone::Clone::clone)
+                    .cache
+                    .get_thumbnail(p)
                     .unwrap_or_else(|| Handle::from_rgba(1, 1, vec![0, 0, 0, 0]));
 
                 let btn = button::image(handle)
@@ -1629,22 +1683,36 @@ impl Application for CosmicViewer {
                         img,
                     ))));
 
-                sensor(btn)
-                    .on_show(move |_| {
-                        Action::App(ViewerMessage::Nav(NavMessage::NavThumbnailShow(img)))
-                    })
-                    .on_hide(Action::App(ViewerMessage::Nav(
-                        NavMessage::NavThumbnailHide(img),
-                    )))
-                    .into()
-            })
-            .collect::<Vec<Element<'_, Action<ViewerMessage>>>>();
+                items.push(
+                    sensor(btn)
+                        .key(img)
+                        .on_show(move |_| {
+                            Action::App(ViewerMessage::Nav(NavMessage::NavThumbnailShow(img)))
+                        })
+                        .on_hide(Action::App(ViewerMessage::Nav(
+                            NavMessage::NavThumbnailHide(img),
+                        )))
+                        .into(),
+                );
+            }
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        let (top_spacer, bottom_spacer) = (
+            first as f32 * pitch,
+            total.saturating_sub(last + 1) as f32 * pitch,
+        );
 
         let nav_grid = container(
-            grid(items)
-                .spacing(space_s)
-                .columns(1)
-                .height(Length::Shrink),
+            Column::new()
+                .push(Space::new().height(Length::Fixed(top_spacer)))
+                .push(
+                    grid(items)
+                        .spacing(space_s)
+                        .columns(1)
+                        .height(Length::Shrink),
+                )
+                .push(Space::new().height(Length::Fixed(bottom_spacer))),
         )
         .padding([0., space_xxs, 0., 0.]);
 
@@ -2606,16 +2674,11 @@ impl Application for CosmicViewer {
                 {
                     let idx = self.nav.index().unwrap_or(0);
                     if idx > 0 {
-                        let thumbnail_size = self.config.thumbnail_size.pixels();
-                        let t = theme::active();
-                        let t = t.cosmic();
-                        let space_s = f32::from(t.spacing.space_s);
+                        let offset = self.grid_scroll_offset(idx - 1);
 
                         return Task::batch(vec![
                             self.update(ViewerMessage::Nav(NavMessage::GridFocus(idx - 1))),
-                            self.update(ViewerMessage::Nav(NavMessage::GridScroll(
-                                (idx - 1) as f32 * (thumbnail_size as f32 + space_s),
-                            ))),
+                            self.update(ViewerMessage::Nav(NavMessage::GridScroll(offset))),
                         ]);
                     }
                 } else if modifiers == Modifiers::NONE
@@ -2630,16 +2693,11 @@ impl Application for CosmicViewer {
                 {
                     let idx = self.nav.index().unwrap_or(0);
                     if idx + 1 < self.nav.total() {
-                        let thumbnail_size = self.config.thumbnail_size.pixels();
-                        let t = theme::active();
-                        let t = t.cosmic();
-                        let space_s = f32::from(t.spacing.space_s);
+                        let offset = self.grid_scroll_offset(idx + 1);
 
                         return Task::batch(vec![
                             self.update(ViewerMessage::Nav(NavMessage::GridFocus(idx + 1))),
-                            self.update(ViewerMessage::Nav(NavMessage::GridScroll(
-                                (idx + 1) as f32 * (thumbnail_size as f32 + space_s),
-                            ))),
+                            self.update(ViewerMessage::Nav(NavMessage::GridScroll(offset))),
                         ]);
                     }
                 } else if let Some(msg) = keyboard_shortcut_handler(key, modifiers, text) {
@@ -2667,18 +2725,19 @@ impl Application for CosmicViewer {
                         self.nav.select(0);
                     }
 
-                    self.rebuild_nav_handles();
                     if !self.nav.is_empty() && self.core().nav_bar_active() {
                         let idx = self.nav.index().unwrap_or(0);
                         tasks.push(self.load_nearby_thumbnails(idx, 10));
                     }
 
-                    // Load the selected image at full resolution.
-                    if let Some(idx) = self.nav.index() {
-                        if let Some(path) = self.nav.current().cloned() {
-                            tasks.push(self.load_full_image(path));
-                        }
+                    // Show the selected image, using the cache when available.
+                    if let Some(path) = self.nav.current().cloned()
+                        && !self.show_cached_image(&path)
+                    {
+                        tasks.push(self.load_full_image(path));
+                    }
 
+                    if let Some(idx) = self.nav.index() {
                         let offset = self.grid_scroll_offset(idx);
                         tasks.push(scroll_to(
                             self.scroll_id.clone(),
@@ -2690,46 +2749,28 @@ impl Application for CosmicViewer {
                     }
                 }
                 NavMessage::NavThumbnailShow(img) => {
-                    if self
-                        .nav_handles
-                        .get(img)
-                        .is_some_and(std::option::Option::is_none)
-                        && let Some(path) = self.nav.images().get(img).cloned()
+                    if let Some(path) = self.nav.images().get(img).cloned()
+                        && self.cache.get_thumbnail(&path).is_none()
+                        && !self.cache.is_thumbnail_pending(&path)
                     {
-                        if let Some(handle) = self.cache.get_thumbnail(&path) {
-                            if let Some(slot) = self.nav_handles.get_mut(img) {
-                                *slot = Some(handle);
-                            }
-                        } else if !self.cache.is_thumbnail_pending(&path) {
-                            self.cache.set_thumbnail_pending(path.clone());
-                            let max_size = self.config.thumbnail_size.pixels();
-                            let cache = self.cache.clone();
+                        self.cache.set_thumbnail_pending(path.clone());
+                        let max_size = self.config.thumbnail_size.pixels();
+                        let cache = self.cache.clone();
 
-                            tasks.push(future(async move {
-                                match load_thumbnail(path.clone(), max_size).await {
-                                    Ok(loaded) => {
-                                        cache.insert_thumbnail(loaded.path.clone(), loaded.handle);
-                                        Action::App(ViewerMessage::Image(
-                                            ImageMessage::ThumbnailReady(
-                                                loaded.path,
-                                                loaded.width,
-                                                loaded.height,
-                                            ),
-                                        ))
-                                    }
-                                    Err(_) => Action::App(ViewerMessage::Image(
-                                        ImageMessage::LoadError(path),
-                                    )),
+                        tasks.push(future(async move {
+                            match load_thumbnail(path.clone(), max_size).await {
+                                Ok(loaded) => {
+                                    cache.insert_thumbnail(loaded.path.clone(), loaded.handle);
+                                    Action::App(ViewerMessage::Image(ImageMessage::ThumbnailReady))
                                 }
-                            }));
-                        }
+                                Err(_) => {
+                                    Action::App(ViewerMessage::Image(ImageMessage::LoadError(path)))
+                                }
+                            }
+                        }));
                     }
                 }
                 NavMessage::NavThumbnailHide(img) => {
-                    if let Some(slot) = self.nav_handles.get_mut(img) {
-                        *slot = None;
-                    }
-
                     if Some(img) != self.nav.index()
                         && let Some(path) = self.nav.images().get(img)
                     {
@@ -2829,7 +2870,6 @@ impl Application for CosmicViewer {
                     let dir = self.nav.dir().map(std::path::Path::to_path_buf);
                     if let Some(dir) = dir {
                         self.nav.set_images(dir, images, selected.as_deref());
-                        self.rebuild_nav_handles();
 
                         if !self.nav.is_empty() && self.core().nav_bar_active() {
                             let idx = self.nav.index().unwrap_or(0);
@@ -2845,34 +2885,13 @@ impl Application for CosmicViewer {
                 }
             },
             ViewerMessage::Image(msg) => match msg {
-                ImageMessage::ThumbnailReady(path, _, _) => {
-                    if let Some(handle) = self.cache.get_thumbnail(&path)
-                        && let Some(idx) = self.nav.images().iter().position(|pos| pos == &path)
-                        && let Some(slot) = self.nav_handles.get_mut(idx)
-                    {
-                        *slot = Some(handle);
-                    }
+                ImageMessage::ThumbnailReady => {
+                    // Trigger a redraw for the updated thumbnail.
                 }
                 ImageMessage::ImageReady(path) => {
                     if let Some(idx) = self.nav.index() {
-                        if self.nav.current() == Some(&path) {
-                            // Clear any tool that is active when reselecting a new image.
-                            if self.viewport.active_tool().is_some() {
-                                self.viewport.cancel_tool();
-                            }
-
-                            // Set the selected image to canvas image.
-                            if let Some(cached) = self.cache.get_full(&path) {
-                                self.viewport.set_image(
-                                    Some(CanvasImage {
-                                        handle: cached.handle,
-                                        width: cached.width,
-                                        height: cached.height,
-                                    }),
-                                    Some(cached.image),
-                                );
-                            }
-                        }
+                        // Display the image only if it is still selected.
+                        self.show_cached_image(&path);
                         if self.core().nav_bar_active() {
                             tasks.push(self.load_nearby_thumbnails(idx, 5));
                         }
@@ -3884,6 +3903,7 @@ impl Application for CosmicViewer {
             }
             ViewerMessage::ShowNavbar(show_navbar) => {
                 config_set!(show_navbar, show_navbar);
+                self.core.nav_bar_set_toggled(show_navbar);
             }
             ViewerMessage::NavScroll(viewport) => {
                 self.cur_scroll = Some(viewport);
@@ -4030,6 +4050,58 @@ fn format_number(num: u64) -> String {
 fn format_system_time(time: std::time::SystemTime) -> String {
     let date_time: chrono::DateTime<chrono::Local> = time.into();
     date_time.format("%a %d %b %Y %I:%M:%S %p %Z").to_string()
+}
+
+/// Initial nav range centered on `center` and clamped to the list.
+fn nav_initial_window(center: usize, total: usize, radius: usize) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+
+    let center = center.min(total - 1);
+    (
+        center.saturating_sub(radius),
+        center.saturating_add(radius).min(total - 1),
+    )
+}
+
+/// Nav range for the current scroll position, including overscan and selection.
+// reason: coordinates are small enough for exact f32 conversion.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn nav_window(
+    scroll_top: f32,
+    viewport_height: f32,
+    inset: f32,
+    pitch: f32,
+    total: usize,
+    selected: Option<usize>,
+    overscan: usize,
+) -> (usize, usize) {
+    if total == 0 || pitch <= 0.0 {
+        return (0, 0);
+    }
+
+    let top = (scroll_top - inset).max(0.0);
+    let bottom = (top + viewport_height.max(0.0)).max(0.0);
+    let mut first = (top / pitch).floor() as usize;
+    let mut last = (bottom / pitch).ceil() as usize;
+
+    first = first.saturating_sub(overscan);
+    last = last.saturating_add(overscan).min(total - 1);
+    if first > last {
+        first = last;
+    }
+
+    if let Some(selected) = selected.filter(|idx| *idx < total) {
+        first = first.min(selected);
+        last = last.max(selected);
+    }
+
+    (first, last)
 }
 
 // reason: the write guard must live across the whole `.faces()` walk (its single

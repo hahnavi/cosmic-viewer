@@ -168,11 +168,15 @@ fn scan_dir_sync(
         .collect();
 
     match sort_mode {
-        SortMode::Name => images.sort_by(|a, b| {
-            let a_name = a.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            let b_name = b.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            natural_cmp(a_name, b_name)
-        }),
+        SortMode::Name => {
+            // Cache normalized names before natural sorting.
+            let mut keyed: Vec<(String, PathBuf)> = images
+                .into_iter()
+                .map(|path| (natural_key(&path), path))
+                .collect();
+            keyed.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
+            images = keyed.into_iter().map(|(_, path)| path).collect();
+        }
         // Cache metadata keys to avoid repeated filesystem lookups.
         SortMode::Date => images.sort_by_cached_key(|path| modified_time(path)),
         SortMode::Size => images.sort_by_cached_key(|path| file_size(path)),
@@ -206,6 +210,14 @@ pub fn is_supported_image(path: &Path) -> bool {
         })
 }
 
+/// Case-folded file name used as the cached key for [`natural_cmp`].
+fn natural_key(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default()
+}
+
 fn natural_cmp(a: &str, b: &str) -> Ordering {
     let mut a_chars = a.chars().peekable();
     let mut b_chars = b.chars().peekable();
@@ -221,21 +233,13 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
                     other => return other,
                 }
             }
-            (Some(_), Some(_)) => {
-                // `peek()` above returned `Some`, so `next()` cannot be `None`.
-                let ac = a_chars
-                    .next()
-                    .expect("peeked char present")
-                    .to_ascii_lowercase();
-                let bc = b_chars
-                    .next()
-                    .expect("peeked char present")
-                    .to_ascii_lowercase();
-                match ac.cmp(&bc) {
-                    Ordering::Equal => {}
-                    other => return other,
+            (Some(ac), Some(bc)) => match ac.cmp(&bc) {
+                Ordering::Equal => {
+                    a_chars.next();
+                    b_chars.next();
                 }
-            }
+                other => return other,
+            },
         }
     }
 }
@@ -245,7 +249,7 @@ fn collect_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> u64 {
 
     while let Some(&c) = chars.peek() {
         if c.is_ascii_digit() {
-            num = num * 10 + (c as u64 - '0' as u64);
+            num = num.saturating_mul(10).saturating_add(c as u64 - '0' as u64);
             chars.next();
         } else {
             break;

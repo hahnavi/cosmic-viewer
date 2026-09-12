@@ -53,6 +53,89 @@ async fn scan_name_descending_is_reverse_sorted() {
 }
 
 #[tokio::test]
+async fn scan_name_sort_is_natural_and_case_insensitive() {
+    let dir = std::env::temp_dir().join("cosmic-viewer-nav-natural-test");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["a10.jpg", "a2.jpg", "A1.jpg", "a1b.jpg", "a1a.jpg"] {
+        fs::write(dir.join(name), b"fake").unwrap();
+    }
+
+    let images = scan_dir(&dir, false, SortMode::Name, SortOrder::Ascending).await;
+    let names: Vec<&str> = images
+        .iter()
+        .map(|path| path.file_name().unwrap().to_str().unwrap())
+        .collect();
+    assert_eq!(names, ["A1.jpg", "a1a.jpg", "a1b.jpg", "a2.jpg", "a10.jpg"]);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn scan_name_sort_orders_by_natural_rules() {
+    let dir = std::env::temp_dir().join("cosmic-viewer-nav-natural-rules-test");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // Numeric runs, digit-run boundaries, and punctuation-before-digit cases.
+    for name in [
+        "a1.jpg",
+        "a2.jpg",
+        "a9.jpg",
+        "a10.jpg",
+        "a100.jpg",
+        "img2.jpg",
+        "img10.jpg",
+        "1.jpg",
+        "1a.jpg",
+        "12.jpg",
+        "photo 1.jpg",
+        "photo1.jpg",
+    ] {
+        fs::write(dir.join(name), b"fake").unwrap();
+    }
+
+    let images = scan_dir(&dir, false, SortMode::Name, SortOrder::Ascending).await;
+    let names: Vec<&str> = images
+        .iter()
+        .map(|path| path.file_name().unwrap().to_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "1.jpg",
+            "1a.jpg",
+            "12.jpg",
+            "a1.jpg",
+            "a2.jpg",
+            "a9.jpg",
+            "a10.jpg",
+            "a100.jpg",
+            "img2.jpg",
+            "img10.jpg",
+            "photo 1.jpg",
+            "photo1.jpg",
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn scan_name_sort_handles_long_digit_runs() {
+    let dir = std::env::temp_dir().join("cosmic-viewer-nav-long-digits-test");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // Longer than u64::MAX digits: must not panic in debug builds.
+    fs::write(dir.join(format!("{}.jpg", "9".repeat(40))), b"fake").unwrap();
+    fs::write(dir.join(format!("{}.jpg", "1".repeat(40))), b"fake").unwrap();
+
+    let images = scan_dir(&dir, false, SortMode::Name, SortOrder::Ascending).await;
+    assert_eq!(images.len(), 2);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn scan_size_ascending_is_ordered() {
     let dir = test_images_dir();
     let images = scan_dir(&dir, false, SortMode::Size, SortOrder::Ascending).await;

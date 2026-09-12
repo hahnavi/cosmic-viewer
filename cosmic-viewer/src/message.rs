@@ -99,8 +99,8 @@ pub enum NavMessage {
 
 #[derive(Debug, Clone)]
 pub enum ImageMessage {
-    // path, width, height (handle is in cache)
-    ThumbnailReady(PathBuf, u32, u32),
+    /// Redraw the visible nav entries after a thumbnail is cached.
+    ThumbnailReady,
     ImageReady(PathBuf),
     LoadError(PathBuf),
 }

@@ -6,7 +6,7 @@ use lru::LruCache;
 use std::{
     collections::HashSet,
     num::NonZeroUsize,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -65,7 +65,7 @@ impl ImageCache {
     }
 
     #[must_use]
-    pub fn get_full(&self, path: &PathBuf) -> Option<CachedImage> {
+    pub fn get_full(&self, path: &Path) -> Option<CachedImage> {
         self.full_images.lock().ok()?.get(path).cloned()
     }
 
