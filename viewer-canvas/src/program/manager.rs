@@ -14,6 +14,7 @@ use cosmic::{
         advanced::renderer as iced_renderer,
         mouse::{self, Button, Cursor, Event as MouseEvent},
         overlay,
+        time::Instant,
     },
     widget::{self, Operation, Widget, canvas::Cache},
 };
@@ -24,6 +25,27 @@ use viewer_tools::{
     ToolOperation,
     crop::{CropSelection, DragHandle},
 };
+
+/// Zoom/pan smoothing time constant in seconds.
+const TRANSITION_TIME_CONSTANT: f32 = 0.045;
+
+/// Maximum time step per tick.
+const TRANSITION_MAX_STEP: f32 = 0.05;
+
+/// Relative zoom threshold for snapping to the target.
+const TRANSITION_ZOOM_EPSILON: f32 = 0.001;
+
+/// Pan threshold for snapping to the target, in logical pixels.
+const TRANSITION_PAN_EPSILON: f32 = 0.1;
+
+/// Smooth, interruptible zoom/pan transition.
+#[derive(Debug, Clone, Copy)]
+struct ViewTransition {
+    target_zoom: f32,
+    target_pan: Vector,
+    viewport_size: Size,
+    last_tick: Instant,
+}
 
 /// Orchestrator that owns the canvas state, edit operations, and undo/redo history.
 pub struct ViewportManager {
@@ -36,6 +58,7 @@ pub struct ViewportManager {
     display_version: u64,
     zoom: f32,
     pan: Vector,
+    transition: Option<ViewTransition>,
     active_tool: Option<ToolKind>,
     pub tool_dragging: bool,
     /// Committed operations (undo stack)
@@ -65,6 +88,7 @@ impl ViewportManager {
             display_version: 0,
             zoom: 1.0,
             pan: Vector::ZERO,
+            transition: None,
             active_tool: None,
             tool_dragging: false,
             operations: Vec::new(),
@@ -102,6 +126,7 @@ impl ViewportManager {
         self.display_version = self.working_version;
         self.zoom = 1.0;
         self.pan = Vector::ZERO;
+        self.transition = None;
         self.active_preview = None;
         self.active_tool = None;
         self.cache.clear();
@@ -127,6 +152,7 @@ impl ViewportManager {
         });
         self.zoom = 1.0;
         self.pan = Vector::ZERO;
+        self.transition = None;
 
         self.operations.clear();
         self.redo_stack.clear();
@@ -175,8 +201,14 @@ impl ViewportManager {
         self.touch_working();
     }
 
+    /// Current view zoom, including any in-flight smooth transition.
     pub const fn zoom(&self) -> f32 {
         self.zoom
+    }
+
+    /// Whether a smooth zoom/pan transition is currently running.
+    pub const fn is_animating(&self) -> bool {
+        self.transition.is_some()
     }
 
     /// Minimum zoom so the image fills the given frame size in both dimensions.
@@ -197,8 +229,10 @@ impl ViewportManager {
         })
     }
 
+    /// Set the zoom immediately, cancelling any running transition.
     pub const fn set_zoom(&mut self, zoom: f32) {
         self.zoom = zoom;
+        self.transition = None;
     }
 
     // reason: image dimensions are pixel counts used for rendering geometry; f32 precision is ample.
@@ -234,20 +268,169 @@ impl ViewportManager {
 
         if fit_scale > 0.0 {
             self.zoom = percent / (fit_scale * 100.0);
+            self.transition = None;
         }
     }
 
     pub fn zoom_to_actual_size(&mut self, viewport_size: Size) {
         self.set_actual_percent(100.0, viewport_size);
-        self.pan = Vector::ZERO;
+        self.set_pan(Vector::ZERO);
+    }
+
+    // reason: image dimensions are pixel counts used for rendering geometry; f32 precision is ample.
+    #[allow(clippy::cast_precision_loss)]
+    fn clamp_pan(&self, pan: Vector, zoom: f32, viewport_size: Size) -> Vector {
+        let Some(image) = self.image.as_ref() else {
+            return pan;
+        };
+        let fit_scale = (viewport_size.width / image.width as f32)
+            .min(viewport_size.height / image.height as f32);
+        let max_x =
+            ((image.width as f32 * zoom).mul_add(fit_scale, -viewport_size.width)).max(0.0) / 2.0;
+        let max_y =
+            ((image.height as f32 * zoom).mul_add(fit_scale, -viewport_size.height)).max(0.0) / 2.0;
+        Vector::new(pan.x.clamp(-max_x, max_x), pan.y.clamp(-max_y, max_y))
+    }
+
+    /// Start a smooth zoom step around a canvas-local anchor.
+    // reason: image dimensions are pixel counts used for rendering geometry; f32 precision is ample.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn zoom_by(&mut self, factor: f32, anchor: Point, viewport_size: Size, now: Instant) {
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        if viewport_size.width <= 0.0 || viewport_size.height <= 0.0 {
+            return;
+        }
+        let Some(image) = self.image.as_ref() else {
+            return;
+        };
+
+        let (from_zoom, from_pan) = self
+            .transition
+            .as_ref()
+            .map_or((self.zoom, self.pan), |transition| {
+                (transition.target_zoom, transition.target_pan)
+            });
+
+        let fit_scale = super::fit_scale(
+            viewport_size.width,
+            viewport_size.height,
+            image.width as f32,
+            image.height as f32,
+        );
+        let is_crop = self.active_tool == Some(ToolKind::Crop);
+        let floor = if is_crop { 1.0 } else { 0.1 };
+        let ceiling = if is_crop || fit_scale <= 0.0 {
+            5.0
+        } else {
+            5.0 / fit_scale
+        };
+
+        let mut target_zoom = from_zoom * factor;
+
+        let before_percent = from_zoom * fit_scale * 100.0;
+        let after_percent = target_zoom * fit_scale * 100.0;
+        if (before_percent < 99.9 && after_percent > 100.0)
+            || (before_percent > 100.1 && after_percent < 100.0)
+        {
+            target_zoom = 1.0 / fit_scale;
+        }
+
+        target_zoom = target_zoom.clamp(floor, ceiling);
+
+        let center = Point::new(viewport_size.width / 2.0, viewport_size.height / 2.0);
+        let anchor_offset = Vector::new(anchor.x - center.x, anchor.y - center.y);
+        let ratio = target_zoom / from_zoom;
+        let mut target_pan = anchor_offset - (anchor_offset - from_pan) * ratio;
+        if !is_crop {
+            target_pan = self.clamp_pan(target_pan, target_zoom, viewport_size);
+        }
+
+        self.transition = Some(ViewTransition {
+            target_zoom,
+            target_pan,
+            viewport_size,
+            last_tick: now,
+        });
+    }
+
+    /// Advance the transition to `now`.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        let Some(mut transition) = self.transition else {
+            return false;
+        };
+
+        let dt = now
+            .saturating_duration_since(transition.last_tick)
+            .as_secs_f32()
+            .min(TRANSITION_MAX_STEP);
+        transition.last_tick = now;
+
+        if dt <= 0.0 {
+            self.transition = Some(transition);
+            return true;
+        }
+
+        let k = 1.0 - (-dt / TRANSITION_TIME_CONSTANT).exp();
+        let log_zoom = self.zoom.max(f32::MIN_POSITIVE).ln();
+        let target_log_zoom = transition.target_zoom.max(f32::MIN_POSITIVE).ln();
+        let mut zoom = (target_log_zoom - log_zoom).mul_add(k, log_zoom).exp();
+        let mut pan = self.pan + (transition.target_pan - self.pan) * k;
+
+        let is_crop = self.active_tool == Some(ToolKind::Crop);
+        if !is_crop {
+            pan = self.clamp_pan(pan, zoom, transition.viewport_size);
+        }
+
+        let settled_pan = if is_crop {
+            transition.target_pan
+        } else {
+            self.clamp_pan(
+                transition.target_pan,
+                transition.target_zoom,
+                transition.viewport_size,
+            )
+        };
+        let zoom_settled = (zoom / transition.target_zoom).ln().abs() <= TRANSITION_ZOOM_EPSILON;
+        let pan_delta = pan - settled_pan;
+        let pan_settled = pan_delta.x.hypot(pan_delta.y) <= TRANSITION_PAN_EPSILON;
+
+        if zoom_settled && pan_settled {
+            zoom = transition.target_zoom;
+            pan = settled_pan;
+        }
+
+        let old_zoom = self.zoom;
+        self.zoom = zoom;
+        self.pan = pan;
+
+        if (zoom - old_zoom).abs() > f32::EPSILON
+            && let (Some(image_size), Some(preview)) =
+                (self.image_size(), self.active_preview.as_deref_mut())
+        {
+            preview.on_zoom_changed(old_zoom, zoom, image_size);
+        }
+
+        if zoom_settled && pan_settled {
+            self.transition = None;
+            false
+        } else {
+            self.transition = Some(transition);
+            true
+        }
     }
 
     pub const fn pan(&self) -> Vector {
         self.pan
     }
 
+    /// Set the pan and update any active transition target.
     pub const fn set_pan(&mut self, pan: Vector) {
         self.pan = pan;
+        if let Some(transition) = self.transition.as_mut() {
+            transition.target_pan = pan;
+        }
     }
 
     pub const fn active_tool(&self) -> Option<ToolKind> {
@@ -480,6 +663,8 @@ impl ViewportManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ZOOM_STEP;
+    use cosmic::iced::time::Duration;
 
     fn base_image(width: u32, height: u32) -> Arc<DynamicImage> {
         Arc::new(DynamicImage::new_rgba8(width, height))
@@ -522,6 +707,217 @@ mod tests {
             before,
             "changed working pixels must rebuild the display texture"
         );
+    }
+
+    /// A manager showing an `image_w` x `image_h` image in a `viewport`-sized canvas.
+    fn manager_with_image(image_w: u32, image_h: u32, viewport: Size) -> ViewportManager {
+        let mut manager = ViewportManager::new();
+        let base = base_image(image_w, image_h);
+        let handle = viewer_core::display_handle(&base);
+        manager.set_image(
+            Some(CanvasImage {
+                handle,
+                width: image_w,
+                height: image_h,
+            }),
+            Some(base),
+        );
+        manager
+            .last_bounds
+            .set(Rectangle::new(Point::new(0.0, 0.0), viewport));
+        manager
+    }
+
+    /// Advance the clock in 60 fps steps until the transition settles.
+    fn settle(manager: &mut ViewportManager, start: Instant) -> Instant {
+        let mut now = start;
+        for _ in 0..600 {
+            if !manager.tick(now) {
+                break;
+            }
+            now += Duration::from_millis(16);
+        }
+        now
+    }
+
+    #[test]
+    fn zoom_step_transitions_smoothly_to_its_target() {
+        let viewport = Size::new(800.0, 800.0);
+        let mut manager = manager_with_image(1000, 1000, viewport);
+        let start = Instant::now();
+
+        manager.zoom_by(ZOOM_STEP, Point::new(400.0, 400.0), viewport, start);
+        assert!(manager.is_animating());
+
+        let mut now = start;
+        let mut previous = manager.zoom();
+        for _ in 0..600 {
+            if !manager.tick(now) {
+                break;
+            }
+            assert!(
+                manager.zoom() >= previous,
+                "zoom must approach its target monotonically"
+            );
+            previous = manager.zoom();
+            now += Duration::from_millis(16);
+        }
+
+        assert!(!manager.is_animating());
+        assert!((manager.zoom() - ZOOM_STEP).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rapid_zoom_steps_compound_onto_the_pending_target() {
+        let viewport = Size::new(800.0, 800.0);
+        let mut manager = manager_with_image(1000, 1000, viewport);
+        let start = Instant::now();
+        let anchor = Point::new(400.0, 400.0);
+
+        manager.zoom_by(ZOOM_STEP, anchor, viewport, start);
+        manager.zoom_by(
+            ZOOM_STEP,
+            anchor,
+            viewport,
+            start + Duration::from_millis(4),
+        );
+        let _ = settle(&mut manager, start);
+
+        let expected = ZOOM_STEP * ZOOM_STEP;
+        assert!((manager.zoom() - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zoom_does_not_stick_at_actual_size_while_animating() {
+        let viewport = Size::new(800.0, 800.0);
+        let mut manager = manager_with_image(1000, 1000, viewport);
+        manager.set_zoom(1.125); // 90% of actual size
+        let start = Instant::now();
+        let anchor = Point::new(400.0, 400.0);
+
+
+        manager.zoom_by(ZOOM_STEP, anchor, viewport, start);
+        manager.zoom_by(
+            ZOOM_STEP,
+            anchor,
+            viewport,
+            start + Duration::from_millis(4),
+        );
+        let _ = settle(&mut manager, start);
+
+        let expected = (1.0 / 0.8) * ZOOM_STEP; // actual size * one step
+        assert!((manager.zoom() - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn transitions_are_frame_rate_independent() {
+        for step_ms in [8_u64, 33] {
+            let viewport = Size::new(800.0, 800.0);
+            let mut manager = manager_with_image(1000, 1000, viewport);
+            let start = Instant::now();
+            manager.zoom_by(ZOOM_STEP, Point::new(400.0, 400.0), viewport, start);
+
+            let mut now = start;
+            for _ in 0..600 {
+                if !manager.tick(now) {
+                    break;
+                }
+                now += Duration::from_millis(step_ms);
+            }
+
+            assert!(!manager.is_animating());
+            assert!((manager.zoom() - ZOOM_STEP).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn zoom_snaps_through_actual_size() {
+        let viewport = Size::new(800.0, 800.0);
+        let mut manager = manager_with_image(1000, 1000, viewport);
+        manager.set_zoom(1.2); // 96% of actual size
+        let start = Instant::now();
+
+        manager.zoom_by(ZOOM_STEP, Point::new(400.0, 400.0), viewport, start);
+        let _ = settle(&mut manager, start);
+
+        assert!((manager.actual_percent(viewport) - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn zoom_limits_are_enforced() {
+        let viewport = Size::new(800.0, 800.0);
+        let mut manager = manager_with_image(4000, 4000, viewport);
+        let mut now = Instant::now();
+        let center = Point::new(400.0, 400.0);
+
+        for _ in 0..40 {
+            manager.zoom_by(2.0, center, viewport, now);
+            now = settle(&mut manager, now);
+        }
+        let percent = manager.actual_percent(viewport);
+        assert!(
+            (percent - 500.0).abs() < 0.1,
+            "zoom in must stop at 500% actual size, got {percent}"
+        );
+
+        for _ in 0..40 {
+            manager.zoom_by(0.5, center, viewport, now);
+            now = settle(&mut manager, now);
+        }
+        assert!((manager.zoom() - 0.1).abs() < 1e-4);
+    }
+
+    #[test]
+    fn wheel_zoom_keeps_the_anchored_point_fixed() {
+        let viewport = Size::new(800.0, 800.0);
+        let bounds = Rectangle::new(Point::new(0.0, 0.0), viewport);
+        let mut manager = manager_with_image(2000, 1500, viewport);
+        let anchor = Point::new(650.0, 240.0);
+
+        let before = manager
+            .screen_to_image(anchor, bounds)
+            .expect("anchor starts over the image");
+
+        let start = Instant::now();
+        manager.zoom_by(2.0, anchor, viewport, start);
+        let _ = settle(&mut manager, start);
+
+        let after = manager
+            .screen_to_image(anchor, bounds)
+            .expect("anchor stays over the image");
+
+        assert!(
+            (after.x - before.x).abs() < 0.05 && (after.y - before.y).abs() < 0.05,
+            "anchored image point moved from {before:?} to {after:?}"
+        );
+    }
+
+    #[test]
+    fn panning_retargets_a_running_transition() {
+        let viewport = Size::new(800.0, 800.0);
+        let mut manager = manager_with_image(2000, 1500, viewport);
+        let start = Instant::now();
+
+        manager.zoom_by(2.0, Point::new(400.0, 400.0), viewport, start);
+        manager.set_pan(Vector::new(120.0, 60.0));
+        let _ = settle(&mut manager, start);
+
+        assert_eq!(manager.pan(), Vector::new(120.0, 60.0));
+    }
+
+    #[test]
+    fn direct_zoom_resets_cancel_the_transition() {
+        let viewport = Size::new(800.0, 800.0);
+        let mut manager = manager_with_image(1000, 1000, viewport);
+        let start = Instant::now();
+
+        manager.zoom_by(ZOOM_STEP, Point::new(400.0, 400.0), viewport, start);
+        assert!(manager.is_animating());
+
+        manager.set_zoom(2.0);
+        assert!(!manager.is_animating());
+        assert!((manager.zoom() - 2.0).abs() < f32::EPSILON);
+        assert!(!manager.tick(start + Duration::from_millis(16)));
     }
 }
 

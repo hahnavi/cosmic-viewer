@@ -56,9 +56,9 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use viewer_canvas::{CanvasImage, CanvasMessage, ToolKind, ViewportManager};
+use viewer_canvas::{CanvasImage, CanvasMessage, ToolKind, ViewportManager, ZOOM_STEP};
 use viewer_config::{AppTheme, ViewerConfig};
 use viewer_core::{
     CachedImage, ClipboardImage, ImageCache, NavState, get_image_dir, image_mime_type,
@@ -1406,38 +1406,20 @@ impl CosmicViewer {
 
         pop.into()
     }
-    /// Multiply the current zoom by `factor`, preserving the fit/crop floor, the 500% ceiling,
-    /// and the snap-through-100% behavior the wheel zoom relied on.
+    /// Start a smooth zoom step by `factor` around the viewport center.
     fn zoom_by(&mut self, factor: f32) {
         let bounds = self.viewport.last_bounds().get();
-        let viewport = Size::new(bounds.width, bounds.height);
-        let before = self.viewport.actual_percent(viewport);
-        let old_zoom = self.viewport.zoom();
-        let floor = if self.viewport.active_tool() == Some(ToolKind::Crop) {
-            1.0
-        } else {
-            0.1
-        };
-        let new_zoom = (old_zoom * factor).clamp(floor, 5.0);
+        let viewport_size = Size::new(bounds.width, bounds.height);
+        let anchor = Point::new(viewport_size.width / 2.0, viewport_size.height / 2.0);
+        self.zoom_by_at(factor, anchor);
+    }
 
-        if let Some(size) = self.viewport.image_size()
-            && let Some(preview) = self.viewport.preview_mut()
-        {
-            preview.on_zoom_changed(old_zoom, new_zoom, size);
-        }
-
-        self.viewport.set_zoom(new_zoom);
-
-        let after = self.viewport.actual_percent(viewport);
-
-        if (before < 99.9 && after > 100.0) || (before > 100.1 && after < 100.0) {
-            self.viewport.set_actual_percent(100.0, viewport);
-        }
-
-        // Cap zoom in at 500%
-        if factor > 1.0 && self.viewport.actual_percent(viewport) > 500.0 {
-            self.viewport.set_actual_percent(500.0, viewport);
-        }
+    /// Smoothly zoom around a canvas-local anchor.
+    fn zoom_by_at(&mut self, factor: f32, anchor: Point) {
+        let bounds = self.viewport.last_bounds().get();
+        let viewport_size = Size::new(bounds.width, bounds.height);
+        self.viewport
+            .zoom_by(factor, anchor, viewport_size, Instant::now());
     }
 
     fn settings(&self) -> Element<'_, ViewerMessage> {
@@ -2714,6 +2696,9 @@ impl Application for CosmicViewer {
                     self.was_narrow = narrow;
                 }
             }
+            ViewerMessage::Animate(now) => {
+                self.viewport.tick(now);
+            }
             ViewerMessage::Nav(msg) => match msg {
                 NavMessage::ScanComplete(dir, images, select) => {
                     self.viewport.cancel_tool();
@@ -2916,9 +2901,9 @@ impl Application for CosmicViewer {
                 CanvasMessage::ContextMenu(point) => {
                     self.context_menu_position = point;
                 }
-                CanvasMessage::ZoomIn => self.zoom_by(1.25),
-                CanvasMessage::ZoomOut => self.zoom_by(1.0 / 1.25),
-                CanvasMessage::ZoomBy(factor) => self.zoom_by(factor),
+                CanvasMessage::ZoomIn => self.zoom_by(ZOOM_STEP),
+                CanvasMessage::ZoomOut => self.zoom_by(1.0 / ZOOM_STEP),
+                CanvasMessage::ZoomBy { factor, anchor } => self.zoom_by_at(factor, anchor),
                 CanvasMessage::Pan(pan) => {
                     let bounds = self.viewport.last_bounds().get();
                     if self.viewport.active_tool() == Some(ToolKind::Crop) {
@@ -3936,6 +3921,12 @@ impl Application for CosmicViewer {
             crate::watcher::watch_directory(self.nav.dir().map(std::path::Path::to_path_buf))
                 .map(ViewerMessage::WatcherEvent);
 
+        let animation_sub = if self.viewport.is_animating() {
+            window::frames().map(|(_id, at)| ViewerMessage::Animate(at))
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
             event::listen_with(|event, _status, _id| match event {
                 iced::Event::Window(iced::window::Event::Resized(size)) => {
@@ -3953,6 +3944,7 @@ impl Application for CosmicViewer {
                 _ => None,
             }),
             watcher_sub,
+            animation_sub,
         ])
     }
 }

@@ -2,7 +2,7 @@
 
 pub mod manager;
 
-use crate::state::{CanvasImage, CanvasMessage, Interaction, ToolKind};
+use crate::state::{CanvasImage, CanvasMessage, Interaction, ToolKind, ZOOM_STEP};
 use cosmic::{
     Renderer, Theme,
     iced::advanced::image::Renderer as IcedRenderer,
@@ -100,20 +100,29 @@ impl Program<CanvasMessage, Theme, Renderer> for ViewerCanvas<'_> {
                     Some(Action::capture())
                 }
                 MouseEvent::WheelScrolled { delta } => {
-                    let msg = match delta {
+                    let factor = match delta {
                         mouse::ScrollDelta::Lines { y, .. } => {
-                            if *y < 0.0 {
-                                CanvasMessage::ZoomOut
+                            if *y > 0.0 {
+                                ZOOM_STEP
+                            } else if *y < 0.0 {
+                                1.0 / ZOOM_STEP
                             } else {
-                                CanvasMessage::ZoomIn
+                                1.0
                             }
                         }
                         mouse::ScrollDelta::Pixels { y, .. } => {
-                            CanvasMessage::ZoomBy((1.0 + y * PIXEL_ZOOM_RATE).clamp(0.5, 2.0))
+                            (1.0 + y * PIXEL_ZOOM_RATE).clamp(0.5, 2.0)
                         }
                     };
 
-                    Some(Action::publish(msg))
+                    if (factor - 1.0).abs() > f32::EPSILON {
+                        Some(Action::publish(CanvasMessage::ZoomBy {
+                            factor,
+                            anchor: position,
+                        }))
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             },

@@ -5,4 +5,4 @@ pub mod state;
 
 // Re-exports
 pub use program::manager::ViewportManager;
-pub use state::{CanvasImage, CanvasMessage, Interaction, ToolKind};
+pub use state::{CanvasImage, CanvasMessage, Interaction, ToolKind, ZOOM_STEP};

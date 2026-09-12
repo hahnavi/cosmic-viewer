@@ -27,6 +27,9 @@ impl Debug for CanvasImage {
     }
 }
 
+/// Zoom multiplier for one discrete step.
+pub const ZOOM_STEP: f32 = 1.25;
+
 /// Messages emitted by the canvas to the application
 #[derive(Debug, Clone)]
 pub enum CanvasMessage {
@@ -34,7 +37,10 @@ pub enum CanvasMessage {
     ContextMenu(Option<Point>),
     ZoomIn,
     ZoomOut,
-    ZoomBy(f32),
+    ZoomBy {
+        factor: f32,
+        anchor: Point,
+    },
     Pan(Vector),
     ActualSize,
     FitToView,
