@@ -2120,7 +2120,7 @@ impl Application for CosmicViewer {
         };
 
         Subscription::batch([
-            event::listen_with(|event, _status, _id| match event {
+            event::listen_with(|event, status, _id| match event {
                 iced::Event::Window(iced::window::Event::Resized(size)) => {
                     Some(ViewerMessage::WindowResized(size))
                 }
@@ -2132,7 +2132,14 @@ impl Application for CosmicViewer {
                     modifiers,
                     text,
                     ..
-                }) => Some(ViewerMessage::KeyPressed(key, modifiers, text)),
+                }) => {
+                    if status == event::Status::Captured && matches!(key, Key::Named(Named::Escape))
+                    {
+                        None
+                    } else {
+                        Some(ViewerMessage::KeyPressed(key, modifiers, text))
+                    }
+                }
                 _ => None,
             }),
             watcher_sub,
@@ -2637,6 +2644,17 @@ impl CosmicViewer {
                     return Task::none();
                 }
 
+                // Overlay dialogs and drawers are dismissed before any other Escape action.
+                if self.wallpaper_dialog.is_some() && matches!(key, Key::Named(Named::Escape)) {
+                    return self.update(ViewerMessage::CloseWallpaperDialog);
+                }
+
+                if matches!(key, Key::Named(Named::Escape))
+                    && let Some(page) = self.context_page
+                {
+                    return self.update(ViewerMessage::Context(page));
+                }
+
                 // Enter applies crop, Escape cancels
                 if matches!(key, Key::Named(Named::Enter))
                     && self.viewport.active_tool() == Some(ToolKind::Crop)
@@ -2964,6 +2982,11 @@ impl CosmicViewer {
                             self.update(ViewerMessage::Nav(NavMessage::GridScroll(offset))),
                         ]);
                     }
+                } else if matches!(key, Key::Named(Named::Escape)) {
+                    if self.unsaved_dialog.is_some() {
+                        return self.update(ViewerMessage::Unsaved(UnsavedChoice::Cancel));
+                    }
+                    return self.update(ViewerMessage::CloseRequested);
                 } else if let Some(msg) = keyboard_shortcut_handler(key, modifiers, text) {
                     return self.update(msg);
                 }
