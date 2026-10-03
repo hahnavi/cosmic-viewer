@@ -161,3 +161,22 @@ pub fn menu_bar<'a>(
             ],
         )
 }
+
+#[allow(clippy::implicit_hasher)]
+pub fn context_menu(key_binds: &HashMap<KeyBind, MenuAction>) -> Vec<menu::Tree<ViewerMessage>> {
+    menu::items(
+        key_binds,
+        vec![
+            menu::Item::Button(
+                fl!("menu-copy-to-clipboard"),
+                None,
+                MenuAction::CopyToClipboard,
+            ),
+            menu::Item::Button(fl!("menu-copy-file-path"), None, MenuAction::CopyFilePath),
+            menu::Item::Button(fl!("menu-revert-all"), None, MenuAction::RevertAll),
+            menu::Item::Button(fl!("menu-image-details"), None, MenuAction::ImageDetails),
+            menu::Item::Button(fl!("menu-set-wallpaper"), None, MenuAction::SetWallpaper),
+            menu::Item::Button(fl!("menu-move-to-trash"), None, MenuAction::MoveToTrash),
+        ],
+    )
+}

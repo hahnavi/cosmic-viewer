@@ -44,7 +44,7 @@ use cosmic::{
         },
         container, divider, dropdown, icon,
         image::Handle,
-        menu::{KeyBind, menu_button},
+        menu::KeyBind,
         mouse_area, nav_bar, popover, scrollable, segmented_button, segmented_control,
         space::horizontal,
         text, toaster,
@@ -674,59 +674,6 @@ impl CosmicViewer {
         }
 
         content.into()
-    }
-
-    fn build_context_menu_element<'a>() -> Element<'a, ViewerMessage> {
-        let menu_item = |label: String, message: ViewerMessage| {
-            menu_button(vec![text(label).into()]).on_press(message)
-        };
-
-        container(
-            Column::new()
-                .push(menu_item(
-                    fl!("menu-copy-to-clipboard"),
-                    ViewerMessage::CopyToClipboard,
-                ))
-                .push(menu_item(
-                    fl!("menu-copy-file-path"),
-                    ViewerMessage::CopyFilePath,
-                ))
-                .push(menu_item(
-                    fl!("menu-revert-all"),
-                    ViewerMessage::Edit(EditMessage::RevertAll),
-                ))
-                .push(menu_item(
-                    fl!("menu-image-details"),
-                    ViewerMessage::Context(ContextMessage::ImageDetails),
-                ))
-                .push(menu_item(
-                    fl!("menu-set-wallpaper"),
-                    ViewerMessage::SetWallpaper,
-                ))
-                .push(menu_item(
-                    fl!("menu-move-to-trash"),
-                    ViewerMessage::MoveToTrash,
-                )),
-        )
-        .padding(1)
-        .style(|theme| {
-            let cosmic = theme.cosmic();
-            // force opaque because it is not a real popup.
-            let component = &cosmic.background(false).component;
-            container::Style {
-                icon_color: Some(component.on.into()),
-                text_color: Some(component.on.into()),
-                background: Some(Background::Color(component.base.into())),
-                border: Border {
-                    radius: cosmic.radius_s().map(|x| x + 1.0).into(),
-                    width: 1.0,
-                    color: component.divider.into(),
-                },
-                ..Default::default()
-            }
-        })
-        .width(Length::Fixed(240.0))
-        .into()
     }
 
     fn popup_style(theme: &cosmic::Theme) -> container::Style {
@@ -1975,18 +1922,14 @@ impl Application for CosmicViewer {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let mut pop = widget::popover(main);
-        if let Some(point) = self.context_menu_position
-            && self.wallpaper_dialog.is_none()
-            && self.delete_dialog.is_none()
-        {
-            pop = pop
-                .popup(Self::build_context_menu_element())
-                .position(widget::popover::Position::Point(point))
-                .on_close(ViewerMessage::Canvas(CanvasMessage::ContextMenu(None)));
-        }
+        let context_menu = (self.wallpaper_dialog.is_none() && self.delete_dialog.is_none())
+            .then(|| crate::menu::context_menu(&self.key_binds));
 
-        let view: Element<'_, Self::Message> = pop.into();
+        let view: Element<'_, Self::Message> = widget::context_menu(main, context_menu)
+            .window_id(self.core().main_window_id().unwrap_or(window::Id::NONE))
+            .on_surface_action(ViewerMessage::Surface)
+            .on_close(ViewerMessage::Canvas(CanvasMessage::ContextMenu(None)))
+            .into();
 
         if let Some(ref path) = self.wallpaper_dialog {
             let path = path.clone();
