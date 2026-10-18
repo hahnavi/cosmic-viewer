@@ -3,11 +3,8 @@
 use cosmic::{
     Element, Theme,
     iced::{
-        Event, Length, Limits, Point, Rectangle, Renderer, Size, Vector,
-        advanced::{
-            Clipboard, Layout, Shell, layout::Node, overlay, renderer as iced_renderer,
-            widget::Tree,
-        },
+        Event, Length, Limits, Rectangle, Renderer, Size, Vector,
+        advanced::{Layout, Shell, overlay, renderer as iced_renderer, widget::Tree},
         mouse::{self, Cursor},
     },
     theme,
@@ -175,34 +172,34 @@ impl<'a, Message> ReflowToolbar<'a, Message> {
 /// Width of a contiguous run of laid-out items placed in a row with `spacing`
 /// between them.
 #[allow(clippy::cast_precision_loss)] // reason: item counts are tiny, exact in f32
-fn run_width(nodes: &[Node], spacing: f32) -> f32 {
+fn run_width(nodes: &[Tree], spacing: f32) -> f32 {
     if nodes.is_empty() {
         return 0.0;
     }
-    let items: f32 = nodes.iter().map(|n| n.size().width).sum();
+    let items: f32 = nodes.iter().map(|n| n.size.width).sum();
     spacing.mul_add((nodes.len() - 1) as f32, items)
 }
 
 /// Tallest item in a run.
-fn run_height(nodes: &[Node]) -> f32 {
-    nodes.iter().map(|n| n.size().height).fold(0.0, f32::max)
+fn run_height(nodes: &[Tree]) -> f32 {
+    nodes.iter().map(|n| n.size.height).fold(0.0, f32::max)
 }
 
 /// Place items left-to-right from `x0`, each vertically centered within
 /// `row_height`. Returns the x just past the last item (no trailing spacing).
-fn place_run(nodes: &mut [Node], x0: f32, y0: f32, row_height: f32, spacing: f32) -> f32 {
+fn place_run(nodes: &mut [Tree], x0: f32, y0: f32, row_height: f32, spacing: f32) -> f32 {
     let mut x = x0;
     for node in nodes.iter_mut() {
-        let height = node.size().height;
-        node.move_to_mut(Point::new(x, y0 + (row_height - height) / 2.0));
-        x += node.size().width + spacing;
+        let height = node.size.height;
+        node.translation = Vector::new(x, y0 + (row_height - height) / 2.0);
+        x += node.size.width + spacing;
     }
     if nodes.is_empty() { x0 } else { x - spacing }
 }
 
 /// Two-row design: `start | end` on the top row, `center` centered below.
 fn place_two_rows(
-    nodes: &mut [Node],
+    nodes: &mut [Tree],
     n_start: usize,
     center_end: usize,
     spacing: f32,
@@ -245,14 +242,14 @@ fn place_two_rows(
 /// Flow every item left-to-right, wrapping to a new row whenever the next item
 /// would exceed `available`. Guarantees nothing is clipped (short of a single
 /// item wider than the whole toolbar).
-fn place_wrapped(nodes: &mut [Node], available: f32, spacing: f32, row_spacing: f32) -> Size {
+fn place_wrapped(nodes: &mut [Tree], available: f32, spacing: f32, row_spacing: f32) -> Size {
     let mut rows: Vec<std::ops::Range<usize>> = Vec::new();
     let mut heights: Vec<f32> = Vec::new();
     let mut row_start = 0;
     let mut x = 0.0;
     let mut row_height = 0.0_f32;
     for (i, node) in nodes.iter().enumerate() {
-        let size = node.size();
+        let size = node.size;
         if x > 0.0 && x + size.width > available {
             rows.push(row_start..i);
             heights.push(row_height);
@@ -288,7 +285,7 @@ impl<Message> Widget<Message, Theme, Renderer> for ReflowToolbar<'_, Message> {
         Size::new(Length::Shrink, Length::Shrink)
     }
 
-    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &Limits) -> Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &Limits) {
         // `limits.max().width` is the true available width - the layout system
         // has already excluded the nav bar and window chrome, so no manual
         // subtraction is needed here.
@@ -300,13 +297,11 @@ impl<Message> Widget<Message, Theme, Renderer> for ReflowToolbar<'_, Message> {
 
         // Lay out every item at its natural size to measure the fit.
         let child_limits = limits.loose();
-        let mut nodes: Vec<Node> = self
-            .children
-            .iter_mut()
-            .zip(&mut tree.children)
-            .map(|(child, state)| child.as_widget_mut().layout(state, renderer, &child_limits))
-            .collect();
+        for (child, state) in self.children.iter_mut().zip(tree.children.iter_mut()) {
+            child.as_widget_mut().layout(state, renderer, &child_limits);
+        }
 
+        let nodes = &mut tree.children[..];
         let start_w = run_width(&nodes[..n_start], spacing);
         let center_w = run_width(&nodes[n_start..center_end], spacing);
         let end_w = run_width(&nodes[center_end..], spacing);
@@ -327,18 +322,18 @@ impl<Message> Widget<Message, Theme, Renderer> for ReflowToolbar<'_, Message> {
 
         let size = if !self.force_stacked && single_w <= available {
             // One row: start | center | end.
-            let row_height = run_height(&nodes);
-            let width = place_run(&mut nodes, 0.0, 0.0, row_height, spacing);
+            let row_height = run_height(nodes);
+            let width = place_run(nodes, 0.0, 0.0, row_height, spacing);
             Size::new(width, row_height)
         } else if top_w <= available && center_w <= available {
             // Two rows, per design - but only when each row actually fits.
-            place_two_rows(&mut nodes, n_start, center_end, spacing, row_spacing)
+            place_two_rows(nodes, n_start, center_end, spacing, row_spacing)
         } else {
             // Fall back to a wrapping flow so nothing is ever clipped.
-            place_wrapped(&mut nodes, available, spacing, row_spacing)
+            place_wrapped(nodes, available, spacing, row_spacing)
         };
 
-        Node::with_children(size, nodes)
+        tree.size = size;
     }
 
     fn draw(
@@ -347,25 +342,14 @@ impl<Message> Widget<Message, Theme, Renderer> for ReflowToolbar<'_, Message> {
         renderer: &mut Renderer,
         theme: &Theme,
         style: &iced_renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: Cursor,
         viewport: &Rectangle,
     ) {
-        for ((child, state), c_layout) in self
-            .children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-        {
-            child.as_widget().draw(
-                state,
-                renderer,
-                theme,
-                style,
-                c_layout.with_virtual_offset(layout.virtual_offset()),
-                cursor,
-                viewport,
-            );
+        for (child, (c_layout, state)) in self.children.iter().zip(layout.iter(&tree.children)) {
+            child
+                .as_widget()
+                .draw(state, renderer, theme, style, c_layout, cursor, viewport);
         }
     }
 
@@ -373,52 +357,38 @@ impl<Message> Widget<Message, Theme, Renderer> for ReflowToolbar<'_, Message> {
         &mut self,
         tree: &mut Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: Cursor,
         renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        for ((child, state), c_layout) in self
+        for (child, (c_layout, state)) in self
             .children
             .iter_mut()
-            .zip(&mut tree.children)
-            .zip(layout.children())
+            .zip(layout.iter_mut(&mut tree.children))
         {
-            child.as_widget_mut().update(
-                state,
-                event,
-                c_layout.with_virtual_offset(layout.virtual_offset()),
-                cursor,
-                renderer,
-                clipboard,
-                shell,
-                viewport,
-            );
+            child
+                .as_widget_mut()
+                .update(state, event, c_layout, cursor, renderer, shell, viewport);
         }
     }
 
     fn mouse_interaction(
         &self,
         tree: &Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: Cursor,
         viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
         self.children
             .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-            .map(|((child, state), c_layout)| {
-                child.as_widget().mouse_interaction(
-                    state,
-                    c_layout.with_virtual_offset(layout.virtual_offset()),
-                    cursor,
-                    viewport,
-                    renderer,
-                )
+            .zip(layout.iter(&tree.children))
+            .map(|(child, (c_layout, state))| {
+                child
+                    .as_widget()
+                    .mouse_interaction(state, c_layout, cursor, viewport, renderer)
             })
             .max()
             .unwrap_or_default()
@@ -427,24 +397,21 @@ impl<Message> Widget<Message, Theme, Renderer> for ReflowToolbar<'_, Message> {
     fn operate(
         &mut self,
         tree: &mut Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        viewport: &Rectangle,
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.container(None, layout.bounds());
+        operation.container(None, layout.bounds(), viewport);
         operation.traverse(&mut |operation| {
-            for ((child, state), c_layout) in self
+            for (child, (c_layout, state)) in self
                 .children
                 .iter_mut()
-                .zip(&mut tree.children)
-                .zip(layout.children())
+                .zip(layout.iter_mut(&mut tree.children))
             {
-                child.as_widget_mut().operate(
-                    state,
-                    c_layout.with_virtual_offset(layout.virtual_offset()),
-                    renderer,
-                    operation,
-                );
+                child
+                    .as_widget_mut()
+                    .operate(state, c_layout, viewport, renderer, operation);
             }
         });
     }
@@ -452,11 +419,12 @@ impl<Message> Widget<Message, Theme, Renderer> for ReflowToolbar<'_, Message> {
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'b>,
+        layout: Layout,
         renderer: &Renderer,
         viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        window: Size,
+    ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         overlay::from_children(
             &mut self.children,
             tree,
@@ -464,6 +432,7 @@ impl<Message> Widget<Message, Theme, Renderer> for ReflowToolbar<'_, Message> {
             renderer,
             viewport,
             translation,
+            window,
         )
     }
 }

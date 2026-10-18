@@ -17,18 +17,18 @@ use cosmic::{
     iced::{
         self, Alignment, Background, Border, Color, Length, Point, Rectangle, Size, Subscription,
         Vector,
-        advanced::graphics::text::{cosmic_text, font_system},
+        advanced::{
+            graphics::text::{cosmic_text, font_system},
+            widget::operation::{Animation, scrollable::scroll_to},
+        },
         alignment::Horizontal,
         clipboard, event, font,
         keyboard::{
             Modifiers,
             key::{Key, Named},
         },
-        widget::{
-            grid,
-            scrollable::{AbsoluteOffset, scroll_to},
-            sensor, stack,
-        },
+        runtime,
+        widget::{grid, scrollable::AbsoluteOffset, sensor, stack},
         window,
     },
     task::future,
@@ -327,7 +327,7 @@ impl CosmicViewer {
             |viewport| {
                 nav_window(
                     viewport.absolute_offset().y,
-                    viewport.bounds().height,
+                    viewport.bounds.height,
                     f32::from(theme::active().cosmic().spacing.space_xxs),
                     self.nav_cell_pitch(),
                     total,
@@ -606,7 +606,7 @@ impl CosmicViewer {
 
     fn image_details_page(&self) -> Element<'_, ViewerMessage> {
         let spacing = cosmic::theme::active().cosmic().spacing;
-        let mut content = Column::new().spacing(spacing.space_m);
+        let mut content = Column::<Element<'_, ViewerMessage>>::new().spacing(spacing.space_m);
 
         let Some(path) = self.nav.current() else {
             return content.push(text::body("No image loaded")).into();
@@ -769,7 +769,7 @@ impl CosmicViewer {
                 // Zoom out / percentage / zoom in stay together as one atom so
                 // the responsive toolbar never splits them across rows.
                 ToolbarItem::new(
-                    Row::new()
+                    Row::<Element<'_, ViewerMessage>>::new()
                         .push(icon_btn(
                             "zoom-out-symbolic",
                             fl!("toolbar-zoom-out"),
@@ -831,7 +831,7 @@ impl CosmicViewer {
 
     fn build_crop_ratio_selector(&self) -> Element<'_, ViewerMessage> {
         let trigger = button::custom(
-            Row::new()
+            Row::<Element<'_, ViewerMessage>>::new()
                 .push(icon_cache_get("ratios-symbolic").icon().size(16))
                 .push(icon_cache_get("pan-down-symbolic").icon().size(12))
                 .align_y(Alignment::Center)
@@ -849,12 +849,12 @@ impl CosmicViewer {
                 .is_some_and(|size| size.height > size.width);
 
             let presets = CropRatio::presets();
-            let mut list = Column::new().spacing(4);
+            let mut list = Column::<Element<'_, ViewerMessage>>::new().spacing(4);
 
             for ratio in presets {
                 let label = ratio.label(is_portrait).to_string();
                 let is_selected = *ratio == self.crop_ratio;
-                let item = Row::new()
+                let item = Row::<Element<'_, ViewerMessage>>::new()
                     .push(container(text::body(label)).width(Length::Fixed(72.0)))
                     .push(if is_selected {
                         Element::from(icon(
@@ -877,7 +877,7 @@ impl CosmicViewer {
                     .width(Length::Shrink);
             }
 
-            let popup = container(list).padding(8).style(|theme| {
+            let popup = container(list).padding(8).style(|theme: &Theme| {
                 let cosmic = theme.cosmic();
                 // force opaque because it is not a real popup.
                 let component = &cosmic.background(false).component;
@@ -950,7 +950,7 @@ impl CosmicViewer {
                 // Zoom out / percentage / zoom in stay together as one atom so
                 // the responsive toolbar never splits them across rows.
                 ToolbarItem::new(
-                    Row::new()
+                    Row::<Element<'_, ViewerMessage>>::new()
                         .push(icon_btn(
                             "zoom-out-symbolic",
                             fl!("toolbar-zoom-out"),
@@ -1123,9 +1123,7 @@ impl CosmicViewer {
                 .width(Length::Fixed(swatch_size))
                 .height(Length::Fixed(swatch_size));
 
-            stack!()
-                .push(filled)
-                .push(border_layer)
+            stack![filled, border_layer]
                 .width(Length::Fixed(swatch_size))
                 .height(Length::Fixed(swatch_size))
                 .into()
@@ -1137,15 +1135,15 @@ impl CosmicViewer {
                 .width(Length::Fixed(swatch_size))
                 .height(Length::Fixed(swatch_size));
 
-            let add_icon = container(icon::from_name("list-add-symbolic").size(14).icon())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill);
+            let add_icon = container(Element::from(
+                icon::from_name("list-add-symbolic").size(14).icon(),
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
 
-            stack!()
-                .push(canvas_bg)
-                .push(add_icon)
+            stack![canvas_bg, add_icon]
                 .width(Length::Fixed(swatch_size))
                 .height(Length::Fixed(swatch_size))
                 .into()
@@ -1169,7 +1167,7 @@ impl CosmicViewer {
             let popup = container(picker)
                 .padding([theme::active().cosmic().spacing.space_s, 0, 0, 0])
                 .max_width(260.0)
-                .style(|theme| {
+                .style(|theme: &Theme| {
                     let cosmic = theme.cosmic();
                     // force opaque because it is not a real popup.
                     let component = &cosmic.background(false).component;
@@ -1251,7 +1249,7 @@ impl CosmicViewer {
         let current_icon = self.selected_shape.icon_name();
 
         let mut trigger = button::custom(
-            Row::new()
+            Row::<Element<'_, ViewerMessage>>::new()
                 .push(icon(icon_cache_get(current_icon)).size(16))
                 .push(icon::from_name("pan-down-symbolic").size(12).icon())
                 .align_y(Alignment::Center)
@@ -1273,7 +1271,7 @@ impl CosmicViewer {
         if self.shape_popup {
             let make_btn = |tool: AnnotateTool, label: String| -> Element<'_, ViewerMessage> {
                 let is_selected = tool == self.selected_shape;
-                let item = Row::new()
+                let item = Row::<Element<'_, ViewerMessage>>::new()
                     .push(icon(icon_cache_get(tool.icon_name())).size(16))
                     .push(text::body(label))
                     .push(if is_selected {
@@ -1292,7 +1290,7 @@ impl CosmicViewer {
                     .into()
             };
 
-            let list = Column::new()
+            let list = Column::<Element<'_, ViewerMessage>>::new()
                 .push(make_btn(AnnotateTool::Rectangle, fl!("shapes-rectangle")))
                 .push(make_btn(AnnotateTool::Block, fl!("shapes-block")))
                 .push(make_btn(AnnotateTool::Ellipse, fl!("shapes-ellipse")))
@@ -1302,7 +1300,7 @@ impl CosmicViewer {
                 .push(make_btn(AnnotateTool::Polygon, fl!("shapes-polygon")))
                 .spacing(2);
 
-            let popup = container(list).padding(8).style(|theme| {
+            let popup = container(list).padding(8).style(|theme: &Theme| {
                 let cosmic = theme.cosmic();
                 // force opaque because it is not a real popup.
                 let component = &cosmic.background(false).component;
@@ -1359,7 +1357,7 @@ impl CosmicViewer {
     #[allow(clippy::too_many_lines)]
     fn build_text_format_dropdown(&self) -> Element<'_, ViewerMessage> {
         let trigger = button::custom(
-            Row::new()
+            Row::<Element<'_, ViewerMessage>>::new()
                 .push(text("Aa"))
                 .push(icon_cache_get("pan-down-symbolic").icon().size(12))
                 .align_y(Alignment::Center)
@@ -1384,7 +1382,7 @@ impl CosmicViewer {
                     .position(|&f| f == self.text_font_family)
             });
 
-            let font_row = Row::new()
+            let font_row = Row::<Element<'_, ViewerMessage>>::new()
                 .push(dropdown(self.font_families(), font_index, |idx| {
                     ViewerMessage::Edit(EditMessage::TextFontFamily(idx))
                 }))
@@ -1400,7 +1398,7 @@ impl CosmicViewer {
                 .on_activate(|entity| ViewerMessage::Edit(EditMessage::TextAlignActivated(entity)));
 
             let popup = container(
-                Column::new()
+                Column::<Element<'_, ViewerMessage>>::new()
                     .push(font_row)
                     .push(style_row)
                     .push(align_row)
@@ -1423,7 +1421,7 @@ impl CosmicViewer {
 
     fn build_stroke_selector(&self) -> Element<'_, ViewerMessage> {
         let trigger = button::custom(
-            Row::new()
+            Row::<Element<'_, ViewerMessage>>::new()
                 .push(icon_cache_get("stroke-width-symbolic").icon().size(16))
                 .push(icon_cache_get("pan-down-symbolic").icon().size(12))
                 .align_y(Alignment::Center)
@@ -1449,11 +1447,11 @@ impl CosmicViewer {
                 )
             };
 
-            let mut list = Column::new().spacing(4);
+            let mut list = Column::<Element<'_, ViewerMessage>>::new().spacing(4);
             for (label, &size) in labels.iter().zip(sizes.iter()) {
                 // presets are exact integer-valued floats; match the active size.
                 let is_selected = (size - current).abs() < f32::EPSILON;
-                let item: Element<'_, ViewerMessage> = Row::new()
+                let item: Element<'_, ViewerMessage> = Row::<Element<'_, ViewerMessage>>::new()
                     .push(text::body(*label))
                     .push(if is_selected {
                         Element::from(icon::from_name("object-select-symbolic").size(16).icon())
@@ -1480,7 +1478,7 @@ impl CosmicViewer {
             let popup = container(list)
                 .padding(8)
                 .width(Length::Fixed(100.0))
-                .style(|theme| {
+                .style(|theme: &Theme| {
                     let cosmic = theme.cosmic();
                     // force opaque because it is not a real popup.
                     let component = &cosmic.background(false).component;
@@ -1794,17 +1792,16 @@ impl Application for CosmicViewer {
                         img,
                     ))));
 
-                items.push(
-                    sensor(btn)
+                items.push(Element::new(
+                    sensor(Element::from(btn))
                         .key(img)
                         .on_show(move |_| {
                             Action::App(ViewerMessage::Nav(NavMessage::NavThumbnailShow(img)))
                         })
                         .on_hide(Action::App(ViewerMessage::Nav(
                             NavMessage::NavThumbnailHide(img),
-                        )))
-                        .into(),
-                );
+                        ))),
+                ));
             }
         }
 
@@ -1815,7 +1812,7 @@ impl Application for CosmicViewer {
         );
 
         let nav_grid = container(
-            Column::new()
+            Column::<Element<'_, Action<ViewerMessage>>>::new()
                 .push(Space::new().height(Length::Fixed(top_spacer)))
                 .push(
                     grid(items)
@@ -1828,7 +1825,7 @@ impl Application for CosmicViewer {
         .padding([0., space_xxs, 0., 0.]);
 
         let scrollable = scrollable(container(nav_grid).padding(space_xxs))
-            .on_scroll(|v| Action::App(ViewerMessage::NavScroll(v)))
+            .on_scroll(|v| Action::App(ViewerMessage::NavScroll(v.viewport)))
             .id(self.scroll_id.clone());
 
         let nav_width = if self.is_narrow() {
@@ -1856,7 +1853,7 @@ impl Application for CosmicViewer {
         let content: Element<'_, Self::Message> = if has_image {
             self.viewport.element().map(ViewerMessage::Canvas)
         } else {
-            Column::new()
+            Column::<Element<'_, ViewerMessage>>::new()
                 .push(Space::new().height(Length::Fill))
                 .push(text("No image selected").center())
                 .push(Space::new().height(Length::Fill))
@@ -1884,10 +1881,10 @@ impl Application for CosmicViewer {
                 if enabled {
                     btn = btn.on_press(msg);
                 }
-                container(btn).center_y(Length::Fill).into()
+                container(Element::from(btn)).center_y(Length::Fill).into()
             };
 
-            Row::new()
+            Row::<Element<'_, ViewerMessage>>::new()
                 .push(nav_btn(
                     "go-previous-symbolic",
                     ViewerMessage::Nav(NavMessage::GridActivate(cur_idx.saturating_sub(1))),
@@ -1912,7 +1909,7 @@ impl Application for CosmicViewer {
                 .into()
         };
 
-        let main = Column::new()
+        let main = Column::<Element<'_, ViewerMessage>>::new()
             .push(image_area)
             .push_maybe(has_image.then(|| {
                 container(self.build_toolbar())
@@ -1935,7 +1932,7 @@ impl Application for CosmicViewer {
             let path = path.clone();
             let spacing = cosmic::theme::active().cosmic().spacing;
 
-            let mut btn_col = Column::new().spacing(spacing.space_s);
+            let mut btn_col = Column::<Element<'_, ViewerMessage>>::new().spacing(spacing.space_s);
             btn_col = btn_col.push(button::standard(fl!("wallpaper-all-displays")).on_press(
                 ViewerMessage::SetWallpaperOn(path.clone(), crate::message::WallpaperTarget::All),
             ));
@@ -1950,7 +1947,7 @@ impl Application for CosmicViewer {
 
             let dialog: Element<'_, Self::Message> = container(
                 container(
-                    Column::new()
+                    Column::<Element<'_, ViewerMessage>>::new()
                         .push(text::title4(fl!("wallpaper-dialog-title")))
                         .push(btn_col)
                         .push(
@@ -1985,7 +1982,8 @@ impl Application for CosmicViewer {
 
     fn dialog(&self) -> Option<Element<'_, Self::Message>> {
         if self.unsaved_dialog.is_some() {
-            let mut row = widget::row::with_capacity(3).align_y(Alignment::Center);
+            let mut row = widget::Row::<Element<'_, ViewerMessage>>::with_capacity(3)
+                .align_y(Alignment::Center);
             row = row.push(widget::text(
                 self.nav
                     .current()
@@ -2146,7 +2144,7 @@ impl CosmicViewer {
                         .and_then(image_mime_type)
                     && let Ok(data) = std::fs::read(&path)
                 {
-                    return clipboard::write_data(ClipboardImage {
+                    return cosmic::iced::runtime::clipboard::write_data(ClipboardImage {
                         data,
                         mime: mime.to_string(),
                     });
@@ -2155,7 +2153,7 @@ impl CosmicViewer {
             ViewerMessage::CopyFilePath => {
                 self.context_menu_position = None;
                 if let Some(path) = self.nav.current() {
-                    return cosmic::iced::clipboard::write(path.display().to_string());
+                    return clipboard::write(path.display().to_string()).map(|_| Action::None);
                 }
             }
             // No-op messages: reserved menu actions with no current behavior.
@@ -2737,14 +2735,14 @@ impl CosmicViewer {
                                             preview.as_any().downcast_ref::<TextPreview>()
                                         && let Some(sel) = t.copy_selection()
                                     {
-                                        return cosmic::iced::clipboard::write(sel);
+                                        return clipboard::write(sel).map(|_| Action::None);
                                     }
                                     return Task::none();
                                 }
                                 "v" => {
-                                    return cosmic::iced::clipboard::read().map(|opt| {
+                                    return cosmic::iced::clipboard::read_text().map(|result| {
                                         cosmic::Action::App(ViewerMessage::TextPaste(
-                                            opt.unwrap_or_default(),
+                                            result.map(|text| (*text).clone()).unwrap_or_default(),
                                         ))
                                     });
                                 }
@@ -2754,7 +2752,7 @@ impl CosmicViewer {
                                             preview.as_any().downcast_ref::<TextPreview>()
                                         && let Some(sel) = t.copy_selection()
                                     {
-                                        let task = cosmic::iced::clipboard::write(sel);
+                                        let task = clipboard::write(sel).map(|_| Action::None);
                                         if let Some(preview) = self.viewport.preview_mut()
                                             && let Some(t) =
                                                 preview.as_any_mut().downcast_mut::<TextPreview>()
@@ -2994,13 +2992,14 @@ impl CosmicViewer {
 
                     if let Some(idx) = self.nav.index() {
                         let offset = self.grid_scroll_offset(idx);
-                        tasks.push(scroll_to(
+                        tasks.push(runtime::task::widget(scroll_to(
                             self.scroll_id.clone(),
                             AbsoluteOffset {
                                 x: Some(0.0),
                                 y: Some(offset),
                             },
-                        ));
+                            Animation::default(),
+                        )));
                     }
                 }
                 NavMessage::NavThumbnailShow(img) => {
@@ -3095,7 +3094,7 @@ impl CosmicViewer {
                     let thumbnail_size = self.config.thumbnail_size.pixels();
 
                     if let Some(cur_viewport) = self.cur_scroll.as_ref() {
-                        let mut bounds = cur_viewport.bounds();
+                        let mut bounds = cur_viewport.bounds;
                         bounds.x = 0.;
                         let abs_offset = cur_viewport.absolute_offset();
                         bounds.y = abs_offset.y;
@@ -3103,13 +3102,14 @@ impl CosmicViewer {
                         if !bounds.contains(Point::new(1., offset))
                             || !bounds.contains(Point::new(1., offset + thumbnail_size as f32))
                         {
-                            tasks.push(scroll_to(
+                            tasks.push(runtime::task::widget(scroll_to(
                                 self.scroll_id.clone(),
                                 AbsoluteOffset {
                                     x: Some(0.0),
                                     y: Some(offset),
                                 },
-                            ));
+                                Animation::default(),
+                            )));
                         }
                     }
                 }
@@ -4205,7 +4205,7 @@ impl CosmicViewer {
 // HELPER FUNCTIONS
 
 fn detail_row<'a>(label: String, value: String) -> Element<'a, ViewerMessage> {
-    Column::new()
+    Column::<Element<'a, ViewerMessage>>::new()
         .push(text::caption(label))
         .push(text::body(value))
         .spacing(2)

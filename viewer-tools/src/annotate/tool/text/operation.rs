@@ -268,6 +268,7 @@ impl ToolOperation for TextOperation {
                 align_x: Horizontal::Left.into(),
                 align_y: Vertical::Top,
                 shaping: Shaping::Advanced,
+                ..Default::default()
             };
             frame.fill_text(text);
 

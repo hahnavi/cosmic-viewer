@@ -5,8 +5,7 @@ use crate::{CanvasImage, CanvasMessage, state::ToolKind};
 use cosmic::{
     Element, Theme,
     iced::advanced::{
-        Clipboard, Layout, Renderer as CoreRenderer, Shell,
-        layout::Node,
+        Layout, Renderer as CoreRenderer, Shell,
         widget::{Tree, tree},
     },
     iced::{
@@ -812,7 +811,6 @@ mod tests {
         let start = Instant::now();
         let anchor = Point::new(400.0, 400.0);
 
-
         manager.zoom_by(ZOOM_STEP, anchor, viewport, start);
         manager.zoom_by(
             ZOOM_STEP,
@@ -1034,10 +1032,11 @@ impl Viewport<'_> {
             overlay_only: false,
         };
 
-        widget::canvas(canvas)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        Element::new(
+            widget::canvas(canvas)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
     }
 
     /// Overlay only canvas (tool overlays, no image).
@@ -1060,10 +1059,11 @@ impl Viewport<'_> {
             overlay_only: true,
         };
 
-        widget::canvas(canvas)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        Element::new(
+            widget::canvas(canvas)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
     }
 
     fn crop_overlay_element(&self) -> Element<'_, CanvasMessage> {
@@ -1079,10 +1079,11 @@ impl Viewport<'_> {
             overlay_only: true,
         };
 
-        widget::canvas(canvas)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        Element::new(
+            widget::canvas(canvas)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
     }
 
     /// Crop interaction: pan on interior clicks, fit-to-view coords for handles.
@@ -1271,13 +1272,13 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
         Size::new(Length::Fill, Length::Fill)
     }
 
-    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &Limits) -> Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &Limits) {
         let mut element = self.canvas_element();
-        let child = element
+        element
             .as_widget_mut()
             .layout(&mut tree.children[0], renderer, limits);
-        let size = child.size();
-        Node::with_children(size, vec![child])
+
+        tree.size = tree.children[0].size;
     }
 
     fn tag(&self) -> tree::Tag {
@@ -1289,7 +1290,8 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
     }
 
     fn children(&self) -> Vec<Tree> {
-        vec![Tree::new(self.canvas_element())]
+        let element = self.canvas_element();
+        vec![Tree::new(&element)]
     }
 
     fn diff(&mut self, tree: &mut Tree) {
@@ -1297,7 +1299,8 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
             self.manager.dirty.set(false);
 
             if let Some(child) = tree.children.first_mut() {
-                *child = Tree::new(self.canvas_element());
+                let element = self.canvas_element();
+                *child = Tree::new(&element);
             }
         } else {
             let element = self.canvas_element();
@@ -1311,7 +1314,7 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
         renderer: &mut Renderer,
         theme: &Theme,
         style: &iced_renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: Cursor,
         viewport: &Rectangle,
     ) {
@@ -1326,10 +1329,7 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
                 renderer,
                 theme,
                 style,
-                layout
-                    .children()
-                    .next()
-                    .expect("layout() always builds one child node"),
+                layout.child(&tree.children[0]),
                 cursor,
                 viewport,
             );
@@ -1347,10 +1347,7 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
                     renderer,
                     theme,
                     style,
-                    layout
-                        .children()
-                        .next()
-                        .expect("layout() always builds one child node"),
+                    layout.child(&tree.children[0]),
                     cursor,
                     viewport,
                 );
@@ -1366,10 +1363,7 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
                     renderer,
                     theme,
                     style,
-                    layout
-                        .children()
-                        .next()
-                        .expect("layout() always builds one child node"),
+                    layout.child(&tree.children[0]),
                     cursor,
                     viewport,
                 );
@@ -1381,10 +1375,9 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
         &mut self,
         tree: &mut Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: Cursor,
         renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, CanvasMessage>,
         viewport: &Rectangle,
     ) {
@@ -1404,17 +1397,14 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
         }
 
         // Fall through to base canvas for zoom, context menu, etc.
+        let child_layout = layout.child(&tree.children[0]);
         let mut element = self.canvas_element();
         element.as_widget_mut().update(
             &mut tree.children[0],
             event,
-            layout
-                .children()
-                .next()
-                .expect("layout() always builds one child node"),
+            child_layout,
             cursor,
             renderer,
-            clipboard,
             shell,
             viewport,
         );
@@ -1423,7 +1413,7 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
     fn mouse_interaction(
         &self,
         tree: &Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: Cursor,
         viewport: &Rectangle,
         renderer: &Renderer,
@@ -1459,10 +1449,7 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
         let element = self.canvas_element();
         element.as_widget().mouse_interaction(
             &tree.children[0],
-            layout
-                .children()
-                .next()
-                .expect("layout() always builds one child node"),
+            layout.child(&tree.children[0]),
             cursor,
             viewport,
             renderer,
@@ -1472,17 +1459,17 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
     fn operate(
         &mut self,
         tree: &mut Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        viewport: &Rectangle,
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
+        let child_layout = layout.child(&tree.children[0]);
         let mut element = self.canvas_element();
         element.as_widget_mut().operate(
             &mut tree.children[0],
-            layout
-                .children()
-                .next()
-                .expect("layout() always builds one child node"),
+            child_layout,
+            viewport,
             renderer,
             operation,
         );
@@ -1491,12 +1478,13 @@ impl Widget<CanvasMessage, Theme, Renderer> for Viewport<'_> {
     fn overlay<'b>(
         &'b mut self,
         _tree: &'b mut Tree,
-        _layout: Layout<'_>,
+        _layout: Layout,
         _renderer: &Renderer,
         _viewport: &Rectangle,
         _translation: Vector,
-    ) -> Option<overlay::Element<'b, CanvasMessage, Theme, Renderer>> {
-        None
+        _window: Size,
+    ) -> Vec<overlay::Element<'b, CanvasMessage, Theme, Renderer>> {
+        Vec::new()
     }
 }
 

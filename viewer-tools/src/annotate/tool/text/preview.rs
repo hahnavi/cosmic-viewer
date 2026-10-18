@@ -20,7 +20,7 @@ use cosmic::{
 };
 use cosmic_text::Edit;
 use image::DynamicImage;
-use std::{any::Any, cell::Cell, f32, time::Instant};
+use std::{any::Any, cell::Cell, f32::consts, time::Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextEditState {
@@ -773,6 +773,7 @@ impl TextPreview {
                         align_x: Horizontal::Left.into(),
                         align_y: Vertical::Top,
                         shaping: Shaping::Advanced,
+                        ..Default::default()
                     };
                     frame.fill_text(text);
 
@@ -865,7 +866,7 @@ impl ToolOperation for TextPreview {
         if steps != 0 {
             frame.push_transform();
             frame.translate(Vector::new(center.x, center.y));
-            frame.rotate(Radians(f32::from(steps) * f32::consts::FRAC_PI_2));
+            frame.rotate(Radians(f32::from(steps) * consts::FRAC_PI_2));
             frame.translate(Vector::new(-center.x, -center.y));
         }
 
@@ -903,6 +904,7 @@ impl ToolOperation for TextPreview {
                     align_x: Horizontal::Left.into(),
                     align_y: Vertical::Top,
                     shaping: Shaping::Advanced,
+                    ..Default::default()
                 };
                 frame.fill_text(placeholder);
             }
